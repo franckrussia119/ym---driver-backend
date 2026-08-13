@@ -28,6 +28,21 @@ const defectSchema = z.object({
   notes: z.string().optional(),
 });
 
+const photoSchema = z.object({
+  fileUrl: z.string(),
+  caption: z.string().optional(),
+  date: z.string(),
+  fieldKey: z.string().optional(),
+});
+
+const voiceNoteSchema = z.object({
+  fileUrl: z.string(),
+  durationSeconds: z.number(),
+  date: z.string(),
+  transcription: z.string().optional(),
+  fieldKey: z.string().optional(),
+});
+
 const reportUpsertSchema = z.object({
   semaineDu: z.string(),
   semaineAu: z.string(),
@@ -35,6 +50,8 @@ const reportUpsertSchema = z.object({
   immatriculation: z.string(),
   marqueModele: z.string(),
   noRemorque: z.string(),
+  driverPhotoUrl: z.string().nullable().optional(),
+  truckPhotoUrl: z.string().nullable().optional(),
   trips: z.array(tripSchema).default([]),
   totalEnlevesPort: z.number().default(0),
   totalLivresDestinataire: z.number().default(0),
@@ -49,6 +66,8 @@ const reportUpsertSchema = z.object({
   suggestionsOperations: z.string().default(''),
   besoinsFormation: z.string().default(''),
   commentairesGeneraux: z.string().default(''),
+  photos: z.array(photoSchema).default([]),
+  voiceNotes: z.array(voiceNoteSchema).default([]),
 });
 
 async function fetchFullReport(reportId: string) {
@@ -79,10 +98,12 @@ reportsRouter.get('/', async (req, res) => {
   const isDriver = req.user!.role === 'CHAUFFEUR';
   const { rows } = await pool.query(
     isDriver
-      ? `SELECT id, "createdAt", "submittedAt", "isSubmitted", status, "nomChauffeur", immatriculation, "semaineDu", "semaineAu"
-         FROM weekly_reports WHERE "driverId" = $1 ORDER BY "createdAt" DESC`
-      : `SELECT id, "createdAt", "submittedAt", "isSubmitted", status, "nomChauffeur", immatriculation, "semaineDu", "semaineAu"
-         FROM weekly_reports ORDER BY "createdAt" DESC`,
+      ? `SELECT wr.id, wr."createdAt", wr."submittedAt", wr."isSubmitted", wr.status, wr."nomChauffeur", wr.immatriculation, wr."semaineDu", wr."semaineAu",
+                (SELECT COUNT(*)::int FROM trip_log_entries t WHERE t."reportId" = wr.id) AS "tripCount"
+         FROM weekly_reports wr WHERE wr."driverId" = $1 ORDER BY wr."createdAt" DESC`
+      : `SELECT wr.id, wr."createdAt", wr."submittedAt", wr."isSubmitted", wr.status, wr."nomChauffeur", wr.immatriculation, wr."semaineDu", wr."semaineAu",
+                (SELECT COUNT(*)::int FROM trip_log_entries t WHERE t."reportId" = wr.id) AS "tripCount"
+         FROM weekly_reports wr ORDER BY wr."createdAt" DESC`,
     isDriver ? [req.user!.sub] : []
   );
   res.json(rows);
@@ -108,14 +129,16 @@ reportsRouter.post('/', requireRole('CHAUFFEUR'), async (req, res) => {
     const { rows } = await client.query(
       `INSERT INTO weekly_reports (
         id, "driverId", "semaineDu", "semaineAu", "nomChauffeur", immatriculation, "marqueModele", "noRemorque",
+        "driverPhotoUrl", "truckPhotoUrl",
         "totalEnlevesPort", "totalLivresDestinataire", "conteneursVidesRetournes",
         "aucunDefautConstate", checklist, "mechanicVerifNom", "mechanicVerifDate",
         "itineraireTrafic", "clientsDestinataires", "suggestionsOperations", "besoinsFormation", "commentairesGeneraux"
       ) VALUES (
-        gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+        gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
       ) RETURNING id`,
       [
         req.user!.sub, d.semaineDu, d.semaineAu, d.nomChauffeur, d.immatriculation, d.marqueModele, d.noRemorque,
+        d.driverPhotoUrl ?? null, d.truckPhotoUrl ?? null,
         d.totalEnlevesPort, d.totalLivresDestinataire, d.conteneursVidesRetournes,
         d.aucunDefautConstate, JSON.stringify(d.checklist), d.mechanicVerifNom ?? null, d.mechanicVerifDate ?? null,
         d.itineraireTrafic, d.clientsDestinataires, d.suggestionsOperations, d.besoinsFormation, d.commentairesGeneraux,
@@ -149,14 +172,16 @@ reportsRouter.patch('/:id', requireRole('CHAUFFEUR'), async (req, res) => {
     await client.query(
       `UPDATE weekly_reports SET
         "semaineDu" = $1, "semaineAu" = $2, "nomChauffeur" = $3, immatriculation = $4,
-        "marqueModele" = $5, "noRemorque" = $6, "totalEnlevesPort" = $7, "totalLivresDestinataire" = $8,
-        "conteneursVidesRetournes" = $9, "aucunDefautConstate" = $10, checklist = $11,
-        "mechanicVerifNom" = $12, "mechanicVerifDate" = $13, "itineraireTrafic" = $14,
-        "clientsDestinataires" = $15, "suggestionsOperations" = $16, "besoinsFormation" = $17,
-        "commentairesGeneraux" = $18
-       WHERE id = $19`,
+        "marqueModele" = $5, "noRemorque" = $6, "driverPhotoUrl" = $7, "truckPhotoUrl" = $8,
+        "totalEnlevesPort" = $9, "totalLivresDestinataire" = $10,
+        "conteneursVidesRetournes" = $11, "aucunDefautConstate" = $12, checklist = $13,
+        "mechanicVerifNom" = $14, "mechanicVerifDate" = $15, "itineraireTrafic" = $16,
+        "clientsDestinataires" = $17, "suggestionsOperations" = $18, "besoinsFormation" = $19,
+        "commentairesGeneraux" = $20
+       WHERE id = $21`,
       [
         d.semaineDu, d.semaineAu, d.nomChauffeur, d.immatriculation, d.marqueModele, d.noRemorque,
+        d.driverPhotoUrl ?? null, d.truckPhotoUrl ?? null,
         d.totalEnlevesPort, d.totalLivresDestinataire, d.conteneursVidesRetournes,
         d.aucunDefautConstate, JSON.stringify(d.checklist), d.mechanicVerifNom ?? null, d.mechanicVerifDate ?? null,
         d.itineraireTrafic, d.clientsDestinataires, d.suggestionsOperations, d.besoinsFormation, d.commentairesGeneraux,
@@ -165,6 +190,8 @@ reportsRouter.patch('/:id', requireRole('CHAUFFEUR'), async (req, res) => {
     );
     await client.query(`DELETE FROM trip_log_entries WHERE "reportId" = $1`, [req.params.id]);
     await client.query(`DELETE FROM inspection_defect_items WHERE "reportId" = $1`, [req.params.id]);
+    await client.query(`DELETE FROM photo_evidence WHERE "reportId" = $1`, [req.params.id]);
+    await client.query(`DELETE FROM audio_notes WHERE "reportId" = $1`, [req.params.id]);
     await insertNestedRows(client, req.params.id, d);
   });
 
@@ -191,6 +218,20 @@ async function insertNestedRows(
       `INSERT INTO inspection_defect_items (id, "reportId", category, name, constate, gravite, "actionPrise", date, notes)
        VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8)`,
       [reportId, defect.category, defect.name, defect.constate, defect.gravite ?? null, defect.actionPrise ?? null, defect.date ?? null, defect.notes ?? null]
+    );
+  }
+  for (const photo of d.photos) {
+    await client.query(
+      `INSERT INTO photo_evidence (id, "reportId", "fileUrl", caption, date, "fieldKey")
+       VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5)`,
+      [reportId, photo.fileUrl, photo.caption ?? null, photo.date, photo.fieldKey ?? null]
+    );
+  }
+  for (const note of d.voiceNotes) {
+    await client.query(
+      `INSERT INTO audio_notes (id, "reportId", "fileUrl", "durationSeconds", date, transcription, "fieldKey")
+       VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6)`,
+      [reportId, note.fileUrl, note.durationSeconds, note.date, note.transcription ?? null, note.fieldKey ?? null]
     );
   }
 }
