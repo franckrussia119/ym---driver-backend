@@ -1,0 +1,501 @@
+// ==========================================================================
+// YM-TRANSIT — Schéma de base de données
+// Reflète fidèlement les types TypeScript du frontend (src/types.ts) afin que
+// la migration API ne casse aucune structure de données déjà en place.
+//
+// Choix de conception : les champs de statut/catégorie (ex: gravité de
+// défaut, statut de panne, type de document...) sont stockés en String plutôt
+// qu'en enum Postgres, et validés côté API avec zod en utilisant EXACTEMENT
+// les mêmes chaînes françaises que le frontend. Cela évite toute couche de
+// traduction enum <-> texte, source classique de bugs.
+// ==========================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  CHAUFFEUR
+  MECANICIEN
+  SUPERVISEUR
+  ADMIN
+  SUPER_ADMIN
+}
+
+// --------------------------------------------------------------------------
+// UTILISATEURS
+// --------------------------------------------------------------------------
+model User {
+  id               String   @id @default(cuid())
+  name             String
+  email            String   @unique
+  passwordHash     String
+  role             UserRole
+  isActive         Boolean  @default(true)
+  camionAssigne    String?
+  driverPhotoUrl   String?
+  truckPhotoUrl    String?
+
+  // Habilitations utilisées par le module de planification
+  habiliteMatieresDangereuses Boolean @default(false)
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relations
+  weeklyReports        WeeklyReport[]        @relation("DriverReports")
+  faultsDeclared       FaultDeclaration[]    @relation("DriverFaults")
+  vehiclesAssigned     FleetVehicle[]        @relation("UsualDriver")
+  performanceScores    DriverPerformanceScore[]
+  routeAssignments     RouteAssignment[]
+  routePlansCreated    RoutePlan[]           @relation("PlanCreatedBy")
+  refreshTokens        RefreshToken[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@map("refresh_tokens")
+}
+
+// --------------------------------------------------------------------------
+// RAPPORT HEBDOMADAIRE DU CHAUFFEUR
+// --------------------------------------------------------------------------
+model WeeklyReport {
+  id             String    @id @default(cuid())
+  createdAt      DateTime  @default(now())
+  submittedAt    DateTime?
+  isSubmitted    Boolean   @default(false) // verrouillé une fois soumis
+  status         String    @default("CONFORME") // 'CONFORME' | 'AVEC_DEFAUTS'
+
+  driverId       String
+  driver         User      @relation("DriverReports", fields: [driverId], references: [id])
+
+  // DriverInfo (aplati)
+  semaineDu       String
+  semaineAu       String
+  nomChauffeur    String
+  immatriculation String
+  marqueModele    String
+  noRemorque      String
+  driverPhotoUrl  String?
+  truckPhotoUrl   String?
+
+  // TripStats (aplati)
+  totalEnlevesPort           Int @default(0)
+  totalLivresDestinataire    Int @default(0)
+  conteneursVidesRetournes   Int @default(0)
+
+  aucunDefautConstate Boolean @default(false)
+  checklist           Json    @default("{}") // Record<string, boolean>
+
+  mechanicVerifNom  String?
+  mechanicVerifDate String?
+
+  // Observations (aplati)
+  itineraireTrafic      String @default("")
+  clientsDestinataires  String @default("")
+  suggestionsOperations String @default("")
+  besoinsFormation      String @default("")
+  commentairesGeneraux  String @default("")
+
+  trips       TripLogEntry[]
+  defects     InspectionDefectItem[]
+  voiceNotes  AudioNote[]
+  photos      PhotoEvidence[]
+  signatures  ReportSignature[]
+
+  @@map("weekly_reports")
+}
+
+model TripLogEntry {
+  id              String       @id @default(cuid())
+  reportId        String
+  report          WeeklyReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  date            String
+  client          String
+  noConteneurBL   String
+  typeConteneur   String       // '20' | '40' | 'Reefer' | 'Autre'
+  depart          String
+  destination     String
+  kmParcourus     Float
+  carburantL      Float
+  fraisRoute      Float        // FCFA
+  createdAt       DateTime     @default(now())
+
+  fuelAnalysis    FuelAnalysisEntry?
+
+  @@map("trip_log_entries")
+}
+
+model InspectionDefectItem {
+  id           String       @id @default(cuid())
+  reportId     String
+  report       WeeklyReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  category     String
+  name         String
+  constate     Boolean      @default(false)
+  gravite      String?      // 'Mineure' | 'Majeure' | 'Critique'
+  actionPrise  String?      // 'Réparé sur place' | 'Signalé au mécanicien' | 'Immobilisation'
+  date         String?
+  notes        String?
+
+  @@map("inspection_defect_items")
+}
+
+model AudioNote {
+  id               String        @id @default(cuid())
+  reportId         String
+  report           WeeklyReport  @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  fileUrl          String        // fichier uploadé, remplace le dataUrl base64
+  durationSeconds  Int
+  date             String
+  transcription     String?
+  fieldKey         String?
+
+  @@map("audio_notes")
+}
+
+model PhotoEvidence {
+  id        String        @id @default(cuid())
+  reportId  String
+  report    WeeklyReport  @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  fileUrl   String        // fichier uploadé, remplace le dataUrl base64
+  caption   String?
+  date      String
+  fieldKey  String?
+
+  @@map("photo_evidence")
+}
+
+model ReportSignature {
+  id         String       @id @default(cuid())
+  reportId   String
+  report     WeeklyReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  role       String       // 'chauffeur' | 'superviseur' | 'logistique'
+  nom        String
+  signature  String       // base64 (petite taille, ok en base) ou fileUrl
+  date       String
+
+  @@unique([reportId, role])
+  @@map("report_signatures")
+}
+
+// --------------------------------------------------------------------------
+// PANNES & ATELIER MÉCANIQUE
+// --------------------------------------------------------------------------
+model FaultDeclaration {
+  id               String   @id @default(cuid())
+  dateSignalement  String
+  chauffeurId      String
+  chauffeur        User     @relation("DriverFaults", fields: [chauffeurId], references: [id])
+  chauffeurNom     String
+  immatriculation  String
+  niveauUrgence    String   // 'Faible' | 'Moyenne' | 'Élevée / Immobilisation'
+  categorie        String
+  description      String
+  localisation     String
+  status           String   // FaultStatus
+  notesSuperviseur String?
+  notesMecanicien  String?
+  invoiceId        String?  @unique
+  invoice          MechanicInvoice? @relation(fields: [invoiceId], references: [id])
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  history          FaultHistoryEntry[]
+
+  @@map("fault_declarations")
+}
+
+model FaultHistoryEntry {
+  id         String           @id @default(cuid())
+  faultId    String
+  fault      FaultDeclaration @relation(fields: [faultId], references: [id], onDelete: Cascade)
+  timestamp  DateTime         @default(now())
+  actorName  String
+  actorRole  UserRole
+  status     String
+  comment    String?
+
+  @@map("fault_history_entries")
+}
+
+model MechanicInvoice {
+  id                  String   @id @default(cuid())
+  truckImmatriculation String
+  chauffeurNom        String?
+  mecanicienNom       String
+  dateIntervention    String
+  descriptionTravaux  String
+  mainOeuvreHeures    Float
+  tauxHoraire         Float
+  totalPieces         Float
+  totalMainOeuvre     Float
+  totalHT             Float
+  tva                 Float
+  totalTTC            Float
+  partsPhotoUrls      String[] @default([])
+  status              String   // 'Transmis Administration' | 'Payé' | 'Brouillon'
+  createdAt           DateTime @default(now())
+
+  parts               SparePartItem[]
+  fault               FaultDeclaration?
+
+  @@map("mechanic_invoices")
+}
+
+model SparePartItem {
+  id         String           @id @default(cuid())
+  invoiceId  String
+  invoice    MechanicInvoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  name       String
+  qty        Int
+  unitPrice  Float
+  total      Float
+
+  @@map("spare_part_items")
+}
+
+// --------------------------------------------------------------------------
+// REGISTRE DE FLOTTE & DOCUMENTS ADMINISTRATIFS
+// --------------------------------------------------------------------------
+model FleetVehicle {
+  id                        String   @id @default(cuid())
+  immatriculation           String   @unique
+  marqueModele              String
+  annee                     Int
+  capaciteTonnage           Float
+  noRemorqueAssociee        String?
+  photoUrl                  String?
+  chauffeurHabituelId       String?
+  chauffeurHabituel         User?    @relation("UsualDriver", fields: [chauffeurHabituelId], references: [id])
+  chauffeurHabituelNom      String?
+  statut                    String   // 'En service' | 'En maintenance' | 'Hors service'
+  kmCompteurInitial         Float    @default(0)
+  consommationReferenceL100 Float
+  notesInterne              String?
+
+  // Habilitation requise pour transporter des matières dangereuses
+  habiliteMatieresDangereuses Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  documents            AdminDocument[]
+  maintenancePlans     MaintenancePlanItem[]
+  scheduledMaintenance ScheduledMaintenance[]
+  routeAssignments     RouteAssignment[]
+
+  @@map("fleet_vehicles")
+}
+
+model AdminDocument {
+  id              String       @id @default(cuid())
+  vehicleId       String
+  vehicle         FleetVehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  type            String       // 'Assurance' | 'Carte Grise' | 'Visite Technique' | 'Patente / Transport' | 'Extincteur' | 'Autre'
+  numeroDoc       String
+  dateEmission    String
+  dateExpiration  String
+  photoScanUrl    String?
+  status          String       // 'VALIDE' | 'EXPIRE_BIENTOT' | 'EXPIRE'
+
+  @@map("admin_documents")
+}
+
+// --------------------------------------------------------------------------
+// MAINTENANCE PRÉVENTIVE
+// --------------------------------------------------------------------------
+model MaintenancePlanItem {
+  id                     String       @id @default(cuid())
+  vehicleId              String
+  vehicle                FleetVehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  vehicleImmatriculation String
+  typeIntervention       String       // MaintenanceCategory
+  frequenceKm            Int
+  dernierKmRealise       Int
+  derniereDateRealisee   String
+  prochainKmEcheance     Int
+  prochaineDateEcheance  String
+  alertLevel             String       // 'VERT' | 'ORANGE' | 'ROUGE'
+
+  scheduledMaintenance   ScheduledMaintenance[]
+
+  @@map("maintenance_plan_items")
+}
+
+model ScheduledMaintenance {
+  id                     String               @id @default(cuid())
+  planItemId             String?
+  planItem               MaintenancePlanItem? @relation(fields: [planItemId], references: [id])
+  vehicleId              String
+  vehicle                FleetVehicle         @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  vehicleImmatriculation String
+  typeIntervention       String
+  dateProgrammee         String
+  mecanicienOuAtelier    String
+  coutEstimeFCFA         Float
+  status                 String               // 'PROGRAMMEE' | 'EN_COURS' | 'EFFECTUEE' | 'ANNULEE'
+  notes                  String?
+  linkedInvoiceId        String?
+
+  @@map("scheduled_maintenance")
+}
+
+// --------------------------------------------------------------------------
+// SUIVI DES CAUTIONS DE CONTENEURS
+// --------------------------------------------------------------------------
+model ContainerCaution {
+  id                        String    @id @default(cuid())
+  noConteneurBL             String
+  ligneMaritime             String
+  clientNom                 String
+  truckImmatriculation      String
+  chauffeurNom              String
+  montantCautionFCFA        Float
+  fraisJournalierRetardFCFA Float
+  depotDestination          String
+  dateDepot                 String
+  dateLimiteRetour          String
+  dateRetourEffectif        String?
+  status                    String    // ContainerCautionStatus
+  montantRecupereFCFA       Float?
+  montantPenaliteFCFA       Float?
+  notes                     String?
+  createdAt                 DateTime  @default(now())
+
+  @@map("container_cautions")
+}
+
+// --------------------------------------------------------------------------
+// ANALYSE CARBURANT & PERFORMANCE CHAUFFEUR
+// --------------------------------------------------------------------------
+model FuelAnalysisEntry {
+  id                       String        @id @default(cuid())
+  tripId                   String?       @unique
+  trip                     TripLogEntry? @relation(fields: [tripId], references: [id])
+  date                     String
+  truckImmatriculation     String
+  chauffeurNom             String
+  trajetLabel              String
+  kmParcourus              Float
+  carburantConsommeL       Float
+  consommationReelleL100   Float
+  consommationRefL100      Float
+  ecartL100                Float
+  anomalieDetectee         Boolean       @default(false)
+  typeAnomalie             String?       // AnomalieType
+
+  @@map("fuel_analysis_entries")
+}
+
+model DriverPerformanceScore {
+  id                    String   @id @default(cuid())
+  chauffeurId           String
+  chauffeur             User     @relation(fields: [chauffeurId], references: [id])
+  chauffeurNom          String
+  periode               String   // ex: '2026-W32' ou '2026-08'
+  totalKm               Float
+  nombreTrajets         Int
+  ponctualitePct        Float
+  moyenneConsoL100      Float
+  pannesSignaleesCount  Int
+  cautionsEnRetardCount Int
+  noteClientMoyenne     Float
+  scoreGlobalPct        Float
+  rang                  Int
+
+  @@unique([chauffeurId, periode])
+  @@map("driver_performance_scores")
+}
+
+// --------------------------------------------------------------------------
+// PLANIFICATION DE TOURNÉES (module "Planification")
+// --------------------------------------------------------------------------
+model RoutePlan {
+  id                    String    @id @default(cuid())
+  createdAt             DateTime  @default(now())
+  createdById           String
+  createdBy             User      @relation("PlanCreatedBy", fields: [createdById], references: [id])
+  dateExecution          String   // date pour laquelle la tournée est planifiée
+  statut                String    @default("BROUILLON") // 'BROUILLON' | 'VALIDE' | 'EN_COURS' | 'TERMINE'
+  totalDistanceKm        Float
+  estimatedDurationHours Float
+  estimatedFuelL         Float
+
+  assignments RouteAssignment[]
+
+  @@map("route_plans")
+}
+
+// Une tournée assignée à un camion + chauffeur, avec ses arrêts ordonnés
+model RouteAssignment {
+  id           String       @id @default(cuid())
+  routePlanId  String
+  routePlan    RoutePlan    @relation(fields: [routePlanId], references: [id], onDelete: Cascade)
+  vehicleId    String
+  vehicle      FleetVehicle @relation(fields: [vehicleId], references: [id])
+  driverId     String
+  driver       User         @relation(fields: [driverId], references: [id])
+  orderIndex   Int          @default(0)
+  waypoints    Json         // RouteWaypointPoint[] dans l'ordre optimisé
+  distanceKm   Float
+  durationH    Float
+
+  @@map("route_assignments")
+}
+
+// --------------------------------------------------------------------------
+// PREUVE DE LIVRAISON (POD)
+// --------------------------------------------------------------------------
+model PODRecord {
+  id                    String   @id @default(cuid())
+  blNumber              String
+  containerNumber       String
+  clientName            String
+  deliveryAddress       String
+  driverName            String
+  truckImmatriculation  String
+  dateTime              String
+  gpsLocation           String?
+  recipientName         String
+  status                String   // 'LIVRE_CONFORME' | 'SOUS_RESERVES' | 'REFUSE' | 'EN_COURS'
+  signatureData         String?
+  photoUrl              String?
+  observations          String?
+  createdAt             DateTime @default(now())
+
+  @@map("pod_records")
+}
+
+// --------------------------------------------------------------------------
+// RETOUR CLIENT
+// --------------------------------------------------------------------------
+model CustomerFeedbackRecord {
+  id                   String   @id @default(cuid())
+  clientName           String
+  blNumber             String
+  driverName           String
+  date                 String
+  rating               Int      // 1-5
+  punctualityScore     String   // 'Excellente' | 'Correcte' | 'Retard'
+  cargoConditionScore  String   // 'Intacte' | 'Dommage Mineur' | 'Avarie Grave'
+  comment              String?
+  status               String   // 'TRAITE' | 'EN_COURS' | 'RECLAMATION'
+  createdAt            DateTime @default(now())
+
+  @@map("customer_feedback_records")
+}
