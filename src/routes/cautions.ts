@@ -61,6 +61,37 @@ cautionsRouter.post('/', requireRole('ADMIN', 'SUPER_ADMIN', 'SUPERVISEUR'), asy
   res.status(201).json(rows[0]);
 });
 
+const updateCautionSchema = cautionSchema.partial().extend({
+  status: z.enum(['En cours', 'Retourné à temps', 'En retard - Pénalité', 'Caution perdue']).optional(),
+  montantPenaliteFCFA: z.number().nonnegative().optional(),
+});
+
+cautionsRouter.patch('/:id', requireRole('ADMIN', 'SUPER_ADMIN', 'SUPERVISEUR'), async (req, res) => {
+  const parsed = updateCautionSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Données invalides' });
+  const d = parsed.data;
+
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  let i = 1;
+  const colMap: Record<string, string> = {
+    noConteneurBL: '"noConteneurBL"', ligneMaritime: '"ligneMaritime"', clientNom: '"clientNom"',
+    truckImmatriculation: '"truckImmatriculation"', chauffeurNom: '"chauffeurNom"',
+    montantCautionFCFA: '"montantCautionFCFA"', fraisJournalierRetardFCFA: '"fraisJournalierRetardFCFA"',
+    depotDestination: '"depotDestination"', dateDepot: '"dateDepot"', dateLimiteRetour: '"dateLimiteRetour"',
+    notes: 'notes', status: 'status', montantPenaliteFCFA: '"montantPenaliteFCFA"',
+  };
+  for (const [key, col] of Object.entries(colMap)) {
+    if ((d as any)[key] !== undefined) { sets.push(`${col} = $${i++}`); values.push((d as any)[key]); }
+  }
+  if (sets.length === 0) return res.status(400).json({ error: 'Aucune modification fournie' });
+  values.push(req.params.id);
+
+  const { rows } = await pool.query(`UPDATE container_cautions SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`, values);
+  if (!rows[0]) return res.status(404).json({ error: 'Caution introuvable' });
+  res.json(rows[0]);
+});
+
 const returnSchema = z.object({ dateRetourEffectif: z.string() });
 
 cautionsRouter.post('/:id/return', requireRole('ADMIN', 'SUPER_ADMIN', 'SUPERVISEUR'), async (req, res) => {
