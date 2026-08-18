@@ -6,7 +6,7 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 
 export const usersRouter = Router();
 
-const ROLES = ['CHAUFFEUR', 'MECANICIEN', 'SUPERVISEUR', 'ADMIN', 'SUPER_ADMIN'] as const;
+const ROLES = ['CHAUFFEUR', 'MECANICIEN', 'SUPERVISEUR', 'ADMIN', 'SUPER_ADMIN', 'SUPERVISEUR_CONTENEURS'] as const;
 
 usersRouter.use(requireAuth, requireRole('SUPER_ADMIN'));
 

@@ -19,16 +19,18 @@ containersRouter.get('/', async (req, res) => {
   const isDriver = req.user!.role === 'CHAUFFEUR';
   const { rows } = await pool.query(
     isDriver
-      ? `SELECT c.*, sd.nom AS "subcontractorNom", u.name AS "driverNom"
+      ? `SELECT c.*, sd.nom AS "subcontractorNom", u.name AS "driverNom", creator.name AS "createdByNom"
          FROM containers c
          LEFT JOIN subcontractor_drivers sd ON sd.id = c."assignedSubcontractorId"
          LEFT JOIN users u ON u.id = c."assignedDriverId"
+         LEFT JOIN users creator ON creator.id = c."createdById"
          WHERE c."assignedDriverId" = $1
          ORDER BY c."createdAt" DESC`
-      : `SELECT c.*, sd.nom AS "subcontractorNom", u.name AS "driverNom"
+      : `SELECT c.*, sd.nom AS "subcontractorNom", u.name AS "driverNom", creator.name AS "createdByNom"
          FROM containers c
          LEFT JOIN subcontractor_drivers sd ON sd.id = c."assignedSubcontractorId"
          LEFT JOIN users u ON u.id = c."assignedDriverId"
+         LEFT JOIN users creator ON creator.id = c."createdById"
          ORDER BY c."createdAt" DESC`,
     isDriver ? [req.user!.sub] : []
   );
@@ -237,15 +239,19 @@ const returnSchema = z.object({
   notes: z.string().optional(),
 });
 
-containersRouter.post('/:id/return', requireRole(...CONTAINER_STAFF), async (req, res) => {
+containersRouter.post('/:id/return', requireRole(...CONTAINER_STAFF, 'CHAUFFEUR'), async (req, res) => {
   const parsed = returnSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Données invalides' });
   const d = parsed.data;
 
-  const existing = await pool.query(`SELECT status FROM containers WHERE id = $1`, [req.params.id]);
+  const existing = await pool.query(`SELECT status, "assignedDriverId" FROM containers WHERE id = $1`, [req.params.id]);
   if (!existing.rows[0]) return res.status(404).json({ error: 'Conteneur introuvable' });
   if (existing.rows[0].status === 'FERME') {
     return res.status(409).json({ error: 'Ce conteneur est déjà clôturé.' });
+  }
+  // Un chauffeur ne peut clôturer que les conteneurs qui lui sont assignés.
+  if (req.user!.role === 'CHAUFFEUR' && existing.rows[0].assignedDriverId !== req.user!.sub) {
+    return res.status(403).json({ error: "Ce conteneur ne vous est pas assigné." });
   }
 
   await withTransaction(async (client) => {
