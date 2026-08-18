@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { pool, withTransaction } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
+import { withReferenceNumberRetry } from '../lib/referenceNumber.js';
 
 export const invoicesRouter = Router();
 invoicesRouter.use(requireAuth);
@@ -55,32 +56,34 @@ invoicesRouter.post('/', requireRole('MECANICIEN', 'ADMIN', 'SUPER_ADMIN'), asyn
   const totalHT = totalPieces + totalMainOeuvre;
   const totalTTC = totalHT * (1 + d.tva / 100);
 
-  const invoiceId = await withTransaction(async (client) => {
-    const { rows } = await client.query(
-      `INSERT INTO mechanic_invoices
-        (id, "truckImmatriculation", "chauffeurNom", "mecanicienNom", "dateIntervention", "descriptionTravaux",
-         "mainOeuvreHeures", "tauxHoraire", "totalPieces", "totalMainOeuvre", "totalHT", tva, "totalTTC",
-         "partsPhotoUrls", status)
-       VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'Brouillon')
-       RETURNING id`,
-      [
-        d.truckImmatriculation, d.chauffeurNom ?? null, req.user!.name, d.dateIntervention, d.descriptionTravaux,
-        d.mainOeuvreHeures, d.tauxHoraire, totalPieces, totalMainOeuvre, totalHT, d.tva, totalTTC, d.partsPhotoUrls,
-      ]
-    );
-    const id = rows[0].id;
-    for (const p of d.parts) {
-      await client.query(
-        `INSERT INTO spare_part_items (id, "invoiceId", name, qty, "unitPrice", total)
-         VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5)`,
-        [id, p.name, p.qty, p.unitPrice, p.qty * p.unitPrice]
+  const invoiceId = await withReferenceNumberRetry('FACT', async (numeroReference) =>
+    withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `INSERT INTO mechanic_invoices
+          (id, "numeroReference", "truckImmatriculation", "chauffeurNom", "mecanicienNom", "dateIntervention", "descriptionTravaux",
+           "mainOeuvreHeures", "tauxHoraire", "totalPieces", "totalMainOeuvre", "totalHT", tva, "totalTTC",
+           "partsPhotoUrls", status)
+         VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'Brouillon')
+         RETURNING id`,
+        [
+          numeroReference, d.truckImmatriculation, d.chauffeurNom ?? null, req.user!.name, d.dateIntervention, d.descriptionTravaux,
+          d.mainOeuvreHeures, d.tauxHoraire, totalPieces, totalMainOeuvre, totalHT, d.tva, totalTTC, d.partsPhotoUrls,
+        ]
       );
-    }
-    if (d.faultId) {
-      await client.query(`UPDATE fault_declarations SET "invoiceId" = $1 WHERE id = $2`, [id, d.faultId]);
-    }
-    return id;
-  });
+      const id = rows[0].id;
+      for (const p of d.parts) {
+        await client.query(
+          `INSERT INTO spare_part_items (id, "invoiceId", name, qty, "unitPrice", total)
+           VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5)`,
+          [id, p.name, p.qty, p.unitPrice, p.qty * p.unitPrice]
+        );
+      }
+      if (d.faultId) {
+        await client.query(`UPDATE fault_declarations SET "invoiceId" = $1 WHERE id = $2`, [id, d.faultId]);
+      }
+      return id;
+    })
+  );
 
   const { rows } = await pool.query(`SELECT * FROM mechanic_invoices WHERE id = $1`, [invoiceId]);
   const parts = await pool.query(`SELECT * FROM spare_part_items WHERE "invoiceId" = $1`, [invoiceId]);

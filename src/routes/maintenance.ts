@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { pool } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
+import { withReferenceNumberRetry } from '../lib/referenceNumber.js';
 
 export const maintenanceRouter = Router();
 maintenanceRouter.use(requireAuth);
@@ -43,17 +44,20 @@ maintenanceRouter.post('/plans', requireRole('ADMIN', 'SUPER_ADMIN', 'SUPERVISEU
     .toISOString()
     .slice(0, 10);
 
-  const { rows } = await pool.query(
-    `INSERT INTO maintenance_plan_items
-      (id, "vehicleId", "vehicleImmatriculation", "typeIntervention", "frequenceKm", "dernierKmRealise",
-       "derniereDateRealisee", "prochainKmEcheance", "prochaineDateEcheance", "alertLevel")
-     VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-    [
-      d.vehicleId, d.vehicleImmatriculation, d.typeIntervention, d.frequenceKm, d.dernierKmRealise,
-      d.derniereDateRealisee, prochainKmEcheance, prochaineDateEcheance,
-      computeAlertLevel(prochainKmEcheance, d.dernierKmRealise),
-    ]
-  );
+  const rows = await withReferenceNumberRetry('PLAN', async (numeroReference) => {
+    const result = await pool.query(
+      `INSERT INTO maintenance_plan_items
+        (id, "numeroReference", "vehicleId", "vehicleImmatriculation", "typeIntervention", "frequenceKm", "dernierKmRealise",
+         "derniereDateRealisee", "prochainKmEcheance", "prochaineDateEcheance", "alertLevel")
+       VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [
+        numeroReference, d.vehicleId, d.vehicleImmatriculation, d.typeIntervention, d.frequenceKm, d.dernierKmRealise,
+        d.derniereDateRealisee, prochainKmEcheance, prochaineDateEcheance,
+        computeAlertLevel(prochainKmEcheance, d.dernierKmRealise),
+      ]
+    );
+    return result.rows;
+  });
   res.status(201).json(rows[0]);
 });
 
@@ -78,13 +82,16 @@ maintenanceRouter.post('/scheduled', requireRole('ADMIN', 'SUPER_ADMIN', 'SUPERV
   if (!parsed.success) return res.status(400).json({ error: 'Données invalides' });
   const d = parsed.data;
 
-  const { rows } = await pool.query(
-    `INSERT INTO scheduled_maintenance
-      (id, "planItemId", "vehicleId", "vehicleImmatriculation", "typeIntervention", "dateProgrammee",
-       "mecanicienOuAtelier", "coutEstimeFCFA", status, notes)
-     VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, 'PROGRAMMEE', $8) RETURNING *`,
-    [d.planItemId ?? null, d.vehicleId, d.vehicleImmatriculation, d.typeIntervention, d.dateProgrammee, d.mecanicienOuAtelier, d.coutEstimeFCFA, d.notes ?? null]
-  );
+  const rows = await withReferenceNumberRetry('MAINT', async (numeroReference) => {
+    const result = await pool.query(
+      `INSERT INTO scheduled_maintenance
+        (id, "numeroReference", "planItemId", "vehicleId", "vehicleImmatriculation", "typeIntervention", "dateProgrammee",
+         "mecanicienOuAtelier", "coutEstimeFCFA", status, notes)
+       VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, 'PROGRAMMEE', $9) RETURNING *`,
+      [numeroReference, d.planItemId ?? null, d.vehicleId, d.vehicleImmatriculation, d.typeIntervention, d.dateProgrammee, d.mecanicienOuAtelier, d.coutEstimeFCFA, d.notes ?? null]
+    );
+    return result.rows;
+  });
   res.status(201).json(rows[0]);
 });
 

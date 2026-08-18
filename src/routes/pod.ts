@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { pool, withTransaction } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
+import { generateReferenceNumber } from '../lib/referenceNumber.js';
 
 export const podRouter = Router();
 podRouter.use(requireAuth);
@@ -70,10 +71,10 @@ async function findOrCreateCurrentReport(client: import('pg').PoolClient, driver
   const marqueModele = camionParts[1] ? camionParts[1].replace(')', '').trim() : '';
 
   const created = await client.query(
-    `INSERT INTO weekly_reports (id, "driverId", "semaineDu", "semaineAu", "nomChauffeur", immatriculation, "marqueModele", "noRemorque")
-     VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, '')
+    `INSERT INTO weekly_reports (id, "numeroReference", "driverId", "semaineDu", "semaineAu", "nomChauffeur", immatriculation, "marqueModele", "noRemorque")
+     VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, '')
      RETURNING id`,
-    [driverId, mondayOfCurrentWeek(), sundayOfCurrentWeek(), driverName, immatriculation, marqueModele]
+    [generateReferenceNumber('RAPP'), driverId, mondayOfCurrentWeek(), sundayOfCurrentWeek(), driverName, immatriculation, marqueModele]
   );
   return created.rows[0].id as string;
 }
@@ -96,18 +97,19 @@ podRouter.post('/', async (req, res) => {
   const driverId = req.user!.sub;
   const driverName = req.user!.name;
   const departLabel = resolveDepartureLabel(d.departurePort, d.departurePortAutre);
+  const numeroReference = generateReferenceNumber('LIV');
 
   const result = await withTransaction(async (client) => {
     // 1. Enregistrer la preuve de livraison
     const { rows: podRows } = await client.query(
       `INSERT INTO pod_records
-        (id, "blNumber", "containerNumber", "clientName", "deliveryAddress", "driverName", "driverId",
+        (id, "numeroReference", "blNumber", "containerNumber", "clientName", "deliveryAddress", "driverName", "driverId",
          "truckImmatriculation", "dateTime", "gpsLocation", "recipientName", status, "bordereauPhotoUrl",
          "photoUrl", observations, "departurePort", "departurePortAutre", "montantRecuFCFA", "distanceKm")
-       VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+       VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
        RETURNING *`,
       [
-        d.blNumber, d.containerNumber, d.clientName, d.deliveryAddress, driverName, driverId,
+        numeroReference, d.blNumber, d.containerNumber, d.clientName, d.deliveryAddress, driverName, driverId,
         d.truckImmatriculation, d.dateTime, d.gpsLocation ?? null, d.recipientName, d.status,
         d.bordereauPhotoUrl ?? null, d.photoUrl ?? null, d.observations ?? null,
         d.departurePort, d.departurePortAutre ?? null, d.montantRecuFCFA, d.distanceKm,

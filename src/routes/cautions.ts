@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { pool } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
+import { withReferenceNumberRetry } from '../lib/referenceNumber.js';
 
 export const cautionsRouter = Router();
 cautionsRouter.use(requireAuth);
@@ -45,19 +46,22 @@ cautionsRouter.post('/', requireRole('ADMIN', 'SUPER_ADMIN', 'SUPERVISEUR'), asy
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Données invalides' });
   const d = parsed.data;
 
-  const { rows } = await pool.query(
-    `INSERT INTO container_cautions
-      (id, "noConteneurBL", "ligneMaritime", "clientNom", "truckImmatriculation", "chauffeurNom",
-       "montantCautionFCFA", "fraisJournalierRetardFCFA", "depotDestination", "dateDepot", "dateLimiteRetour",
-       status, notes)
-     VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'En cours', $11)
-     RETURNING *`,
-    [
-      d.noConteneurBL, d.ligneMaritime, d.clientNom, d.truckImmatriculation, d.chauffeurNom,
-      d.montantCautionFCFA, d.fraisJournalierRetardFCFA, d.depotDestination, d.dateDepot, d.dateLimiteRetour,
-      d.notes ?? null,
-    ]
-  );
+  const rows = await withReferenceNumberRetry('CAUT', async (numeroReference) => {
+    const result = await pool.query(
+      `INSERT INTO container_cautions
+        (id, "numeroReference", "noConteneurBL", "ligneMaritime", "clientNom", "truckImmatriculation", "chauffeurNom",
+         "montantCautionFCFA", "fraisJournalierRetardFCFA", "depotDestination", "dateDepot", "dateLimiteRetour",
+         status, notes)
+       VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'En cours', $12)
+       RETURNING *`,
+      [
+        numeroReference, d.noConteneurBL, d.ligneMaritime, d.clientNom, d.truckImmatriculation, d.chauffeurNom,
+        d.montantCautionFCFA, d.fraisJournalierRetardFCFA, d.depotDestination, d.dateDepot, d.dateLimiteRetour,
+        d.notes ?? null,
+      ]
+    );
+    return result.rows;
+  });
   res.status(201).json(rows[0]);
 });
 

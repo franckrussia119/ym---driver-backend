@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { pool, withTransaction } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
+import { withReferenceNumberRetry } from '../lib/referenceNumber.js';
 
 export const reportsRouter = Router();
 reportsRouter.use(requireAuth);
@@ -125,29 +126,31 @@ reportsRouter.post('/', requireRole('CHAUFFEUR'), async (req, res) => {
   }
   const d = parsed.data;
 
-  const reportId = await withTransaction(async (client) => {
-    const { rows } = await client.query(
-      `INSERT INTO weekly_reports (
-        id, "driverId", "semaineDu", "semaineAu", "nomChauffeur", immatriculation, "marqueModele", "noRemorque",
-        "driverPhotoUrl", "truckPhotoUrl",
-        "totalEnlevesPort", "totalLivresDestinataire", "conteneursVidesRetournes",
-        "aucunDefautConstate", checklist, "mechanicVerifNom", "mechanicVerifDate",
-        "itineraireTrafic", "clientsDestinataires", "suggestionsOperations", "besoinsFormation", "commentairesGeneraux"
-      ) VALUES (
-        gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
-      ) RETURNING id`,
-      [
-        req.user!.sub, d.semaineDu, d.semaineAu, d.nomChauffeur, d.immatriculation, d.marqueModele, d.noRemorque,
-        d.driverPhotoUrl ?? null, d.truckPhotoUrl ?? null,
-        d.totalEnlevesPort, d.totalLivresDestinataire, d.conteneursVidesRetournes,
-        d.aucunDefautConstate, JSON.stringify(d.checklist), d.mechanicVerifNom ?? null, d.mechanicVerifDate ?? null,
-        d.itineraireTrafic, d.clientsDestinataires, d.suggestionsOperations, d.besoinsFormation, d.commentairesGeneraux,
-      ]
-    );
-    const id = rows[0].id;
-    await insertNestedRows(client, id, d);
-    return id;
-  });
+  const reportId = await withReferenceNumberRetry('RAPP', async (numeroReference) =>
+    withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `INSERT INTO weekly_reports (
+          id, "numeroReference", "driverId", "semaineDu", "semaineAu", "nomChauffeur", immatriculation, "marqueModele", "noRemorque",
+          "driverPhotoUrl", "truckPhotoUrl",
+          "totalEnlevesPort", "totalLivresDestinataire", "conteneursVidesRetournes",
+          "aucunDefautConstate", checklist, "mechanicVerifNom", "mechanicVerifDate",
+          "itineraireTrafic", "clientsDestinataires", "suggestionsOperations", "besoinsFormation", "commentairesGeneraux"
+        ) VALUES (
+          gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+        ) RETURNING id`,
+        [
+          numeroReference, req.user!.sub, d.semaineDu, d.semaineAu, d.nomChauffeur, d.immatriculation, d.marqueModele, d.noRemorque,
+          d.driverPhotoUrl ?? null, d.truckPhotoUrl ?? null,
+          d.totalEnlevesPort, d.totalLivresDestinataire, d.conteneursVidesRetournes,
+          d.aucunDefautConstate, JSON.stringify(d.checklist), d.mechanicVerifNom ?? null, d.mechanicVerifDate ?? null,
+          d.itineraireTrafic, d.clientsDestinataires, d.suggestionsOperations, d.besoinsFormation, d.commentairesGeneraux,
+        ]
+      );
+      const id = rows[0].id;
+      await insertNestedRows(client, id, d);
+      return id;
+    })
+  );
 
   const full = await fetchFullReport(reportId);
   res.status(201).json(full);

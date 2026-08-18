@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { pool, withTransaction } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
+import { withReferenceNumberRetry } from '../lib/referenceNumber.js';
 
 export const faultsRouter = Router();
 faultsRouter.use(requireAuth);
@@ -67,22 +68,24 @@ faultsRouter.post('/', requireRole('CHAUFFEUR'), async (req, res) => {
   }
   const d = parsed.data;
 
-  const faultId = await withTransaction(async (client) => {
-    const { rows } = await client.query(
-      `INSERT INTO fault_declarations
-        (id, "dateSignalement", "chauffeurId", "chauffeurNom", immatriculation, "niveauUrgence", categorie, description, localisation, status)
-       VALUES (gen_random_uuid()::text, to_char(now(), 'YYYY-MM-DD'), $1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING id`,
-      [req.user!.sub, req.user!.name, d.immatriculation, d.niveauUrgence, d.categorie, d.description, d.localisation, FAULT_STATUSES[0]]
-    );
-    const id = rows[0].id;
-    await client.query(
-      `INSERT INTO fault_history_entries (id, "faultId", "actorName", "actorRole", status)
-       VALUES (gen_random_uuid()::text, $1, $2, $3, $4)`,
-      [id, req.user!.name, req.user!.role, FAULT_STATUSES[0]]
-    );
-    return id;
-  });
+  const faultId = await withReferenceNumberRetry('PANNE', async (numeroReference) =>
+    withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `INSERT INTO fault_declarations
+          (id, "numeroReference", "dateSignalement", "chauffeurId", "chauffeurNom", immatriculation, "niveauUrgence", categorie, description, localisation, status)
+         VALUES (gen_random_uuid()::text, $1, to_char(now(), 'YYYY-MM-DD'), $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING id`,
+        [numeroReference, req.user!.sub, req.user!.name, d.immatriculation, d.niveauUrgence, d.categorie, d.description, d.localisation, FAULT_STATUSES[0]]
+      );
+      const id = rows[0].id;
+      await client.query(
+        `INSERT INTO fault_history_entries (id, "faultId", "actorName", "actorRole", status)
+         VALUES (gen_random_uuid()::text, $1, $2, $3, $4)`,
+        [id, req.user!.name, req.user!.role, FAULT_STATUSES[0]]
+      );
+      return id;
+    })
+  );
 
   const { rows } = await pool.query(`SELECT * FROM fault_declarations WHERE id = $1`, [faultId]);
   res.status(201).json(rows[0]);

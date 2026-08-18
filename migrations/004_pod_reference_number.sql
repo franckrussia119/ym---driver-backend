@@ -1,0 +1,1 @@
+ALTER TABLE pod_records ADD COLUMN IF NOT EXISTS "numeroReference" TEXT UNIQUE;
