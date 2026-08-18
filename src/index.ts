@@ -28,9 +28,16 @@ dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 
+// Nécessaire derrière le proxy Traefik de Coolify : sans ceci, express-rate-limit
+// ne peut pas identifier correctement les utilisateurs via X-Forwarded-For.
+app.set('trust proxy', 1);
+
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',') ?? '*' }));
-app.use(express.json({ limit: '2mb' }));
+// Les photos passent désormais par /api/uploads (multipart, fichier réel sur
+// disque) plutôt que par du base64 intégré au JSON — cette limite reste
+// basse intentionnellement pour éviter les abus, pas pour bloquer des photos.
+app.use(express.json({ limit: '3mb' }));
 app.use(morgan('tiny'));
 
 // Anti brute-force sur la connexion : 20 tentatives / 15 min / IP.
@@ -62,6 +69,18 @@ app.use('/api/uploads', uploadsRouter);
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error(err);
+  if (err?.type === 'entity.too.large' || err?.status === 413) {
+    return res.status(413).json({ error: 'Fichier ou requête trop volumineux. Réduisez la taille de la photo.' });
+  }
+  if (err?.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Requête invalide (JSON mal formé).' });
+  }
+  if (err?.message === 'Type de fichier non autorisé') {
+    return res.status(400).json({ error: err.message });
+  }
+  // Erreur inattendue : message générique côté client, détail complet dans
+  // les logs serveur (ci-dessus) pour ne jamais exposer de détails internes
+  // (ex: structure de la base de données) au navigateur.
   res.status(500).json({ error: 'Erreur interne du serveur' });
 });
 
