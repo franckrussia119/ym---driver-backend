@@ -9,6 +9,7 @@ const DEMO_USERS = [
   { name: 'Marc Tremblay (Administration)', email: 'admin@ym-transit.com', role: 'ADMIN', password: 'admin123' },
   { name: 'Ousmane Sow (Superviseur Flotte)', email: 'superviseur@ym-transit.com', role: 'SUPERVISEUR', password: 'super123' },
   { name: 'Antoine Vasseur (Chef Atelier)', email: 'mecanicien@ym-transit.com', role: 'MECANICIEN', password: 'mech123' },
+  { name: 'Fatou Ndiaye (Superviseur Conteneurs)', email: 'conteneurs@ym-transit.com', role: 'SUPERVISEUR_CONTENEURS', password: 'cont123' },
   { name: 'Jean-Marc Diallo', email: 'chauffeur@ym-transit.com', role: 'CHAUFFEUR', password: 'driver123', camionAssigne: 'AB-789-XY (Volvo FH 500)' },
 ];
 

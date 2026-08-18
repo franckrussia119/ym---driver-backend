@@ -19,6 +19,9 @@ import { fuelRouter } from './routes/fuel.js';
 import { performanceRouter } from './routes/performance.js';
 import { routePlanningRouter } from './routes/routePlanning.js';
 import { driverHistoryRouter } from './routes/driverHistory.js';
+import { containersRouter } from './routes/containers.js';
+import { subcontractorsRouter } from './routes/subcontractors.js';
+import { restrictContainerSupervisorScope } from './middleware/auth.js';
 import { podRouter } from './routes/pod.js';
 import { feedbackRouter } from './routes/feedback.js';
 import { uploadsRouter } from './routes/uploads.js';
@@ -50,6 +53,10 @@ app.use('/api', rateLimit({ windowMs: 60 * 1000, max: 300, standardHeaders: true
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 app.use('/uploads', express.static(process.env.UPLOAD_DIR ?? path.join(__dirname, '..', 'uploads')));
 
+// Garde-fou global : le Superviseur Conteneurs ne peut atteindre que le
+// module conteneurs, quel que soit ce qu'un routeur individuel autoriserait.
+app.use(restrictContainerSupervisorScope);
+
 app.use('/api/auth', authRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/reports', reportsRouter);
@@ -62,6 +69,8 @@ app.use('/api/fuel', fuelRouter);
 app.use('/api/performance', performanceRouter);
 app.use('/api/route-planning', routePlanningRouter);
 app.use('/api/driver-history', driverHistoryRouter);
+app.use('/api/containers', containersRouter);
+app.use('/api/subcontractors', subcontractorsRouter);
 app.use('/api/pod', podRouter);
 app.use('/api/feedback', feedbackRouter);
 app.use('/api/uploads', uploadsRouter);

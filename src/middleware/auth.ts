@@ -34,3 +34,43 @@ export function requireRole(...roles: string[]) {
     next();
   };
 }
+
+// Le Superviseur Conteneurs a un périmètre volontairement très étroit
+// (uniquement le module conteneurs). Plutôt que de compter sur chaque
+// routeur pour l'exclure individuellement des données hors périmètre
+// (source d'oublis, comme cela a été le cas pour /vehicles et /invoices
+// qui n'avaient historiquement aucune restriction de rôle en lecture),
+// ce garde-fou global bloque ce rôle sur toute route non listée ici,
+// quel que soit ce qui est ajouté au routeur à l'avenir.
+const CONTAINER_SUPERVISOR_ALLOWED_PREFIXES = [
+  '/api/auth',
+  '/api/containers',
+  '/api/subcontractors',
+  '/api/pod',
+  '/api/uploads',
+  '/health',
+];
+
+export function restrictContainerSupervisorScope(req: Request, res: Response, next: NextFunction) {
+  // Ce garde-fou doit fonctionner même avant que le requireAuth propre à
+  // chaque routeur n'ait eu la chance de s'exécuter — on décode donc le
+  // jeton nous-mêmes plutôt que de dépendre de req.user.
+  let role: string | undefined = req.user?.role;
+  if (!role) {
+    const header = req.headers.authorization;
+    if (header?.startsWith('Bearer ')) {
+      try {
+        role = verifyAccessToken(header.slice('Bearer '.length)).role;
+      } catch {
+        return next(); // jeton invalide : laissé au requireAuth normal du routeur
+      }
+    }
+  }
+
+  if (role !== 'SUPERVISEUR_CONTENEURS') return next();
+  const allowed = CONTAINER_SUPERVISOR_ALLOWED_PREFIXES.some((p) => req.path.startsWith(p));
+  if (!allowed) {
+    return res.status(403).json({ error: 'Accès refusé : ce compte est limité au module conteneurs.' });
+  }
+  next();
+}

@@ -67,28 +67,28 @@ driverHistoryRouter.get('/:id', async (req, res) => {
 
   const [reports, faults, pod, invoices, cautions, fuel, scores, tripAgg] = await Promise.all([
     pool.query(
-      `SELECT wr.id, wr."createdAt", wr."submittedAt", wr."isSubmitted", wr.status, wr."semaineDu", wr."semaineAu", wr.immatriculation
+      `SELECT wr.id, wr."numeroReference", wr."createdAt", wr."submittedAt", wr."isSubmitted", wr.status, wr."semaineDu", wr."semaineAu", wr.immatriculation
        FROM weekly_reports wr WHERE wr."driverId" = $1 ${reportsClause} ORDER BY wr."createdAt" DESC`,
       reportsParams
     ),
     pool.query(
-      `SELECT fd.id, fd."dateSignalement", fd.status, fd.categorie, fd."niveauUrgence", fd.description, fd."createdAt"
+      `SELECT fd.id, fd."numeroReference", fd."dateSignalement", fd.status, fd.categorie, fd."niveauUrgence", fd.description, fd."createdAt"
        FROM fault_declarations fd WHERE fd."chauffeurId" = $1 ${faultsClause} ORDER BY fd."createdAt" DESC`,
       faultsParams
     ),
     pool.query(
-      `SELECT pr.id, pr."blNumber", pr."containerNumber", pr."clientName", pr.status, pr."dateTime", pr."createdAt",
+      `SELECT pr.id, pr."numeroReference", pr."blNumber", pr."containerNumber", pr."clientName", pr.status, pr."dateTime", pr."createdAt",
               pr."departurePort", pr."departurePortAutre", pr."montantRecuFCFA", pr."distanceKm"
        FROM pod_records pr WHERE (pr."driverId" = $1 OR pr."driverName" = $2) ${podClause} ORDER BY pr."createdAt" DESC`,
       podParams
     ),
     pool.query(
-      `SELECT mi.id, mi."dateIntervention", mi."totalTTC", mi.status, mi."createdAt"
+      `SELECT mi.id, mi."numeroReference", mi."dateIntervention", mi."totalTTC", mi.status, mi."createdAt"
        FROM mechanic_invoices mi WHERE mi."chauffeurNom" = $1 ${invoicesClause} ORDER BY mi."createdAt" DESC`,
       invoicesParams
     ),
     pool.query(
-      `SELECT cc.id, cc."noConteneurBL", cc.status, cc."montantCautionFCFA", cc."montantPenaliteFCFA", cc."dateLimiteRetour"
+      `SELECT cc.id, cc."numeroReference", cc."noConteneurBL", cc.status, cc."montantCautionFCFA", cc."montantPenaliteFCFA", cc."dateLimiteRetour"
        FROM container_cautions cc WHERE cc."chauffeurNom" = $1 ${cautionsClause} ORDER BY cc."createdAt" DESC`,
       cautionsParams
     ),

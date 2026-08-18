@@ -99,10 +99,10 @@ reportsRouter.get('/', async (req, res) => {
   const isDriver = req.user!.role === 'CHAUFFEUR';
   const { rows } = await pool.query(
     isDriver
-      ? `SELECT wr.id, wr."createdAt", wr."submittedAt", wr."isSubmitted", wr.status, wr."nomChauffeur", wr.immatriculation, wr."semaineDu", wr."semaineAu",
+      ? `SELECT wr.id, wr."numeroReference", wr."createdAt", wr."submittedAt", wr."isSubmitted", wr.status, wr."nomChauffeur", wr.immatriculation, wr."semaineDu", wr."semaineAu",
                 (SELECT COUNT(*)::int FROM trip_log_entries t WHERE t."reportId" = wr.id) AS "tripCount"
          FROM weekly_reports wr WHERE wr."driverId" = $1 ORDER BY wr."createdAt" DESC`
-      : `SELECT wr.id, wr."createdAt", wr."submittedAt", wr."isSubmitted", wr.status, wr."nomChauffeur", wr.immatriculation, wr."semaineDu", wr."semaineAu",
+      : `SELECT wr.id, wr."numeroReference", wr."createdAt", wr."submittedAt", wr."isSubmitted", wr.status, wr."nomChauffeur", wr.immatriculation, wr."semaineDu", wr."semaineAu",
                 (SELECT COUNT(*)::int FROM trip_log_entries t WHERE t."reportId" = wr.id) AS "tripCount"
          FROM weekly_reports wr ORDER BY wr."createdAt" DESC`,
     isDriver ? [req.user!.sub] : []
