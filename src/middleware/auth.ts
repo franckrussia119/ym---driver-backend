@@ -48,6 +48,7 @@ const CONTAINER_SUPERVISOR_ALLOWED_PREFIXES = [
   '/api/subcontractors',
   '/api/pod',
   '/api/uploads',
+  '/api/users/drivers',
   '/health',
 ];
 

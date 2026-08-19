@@ -8,6 +8,23 @@ export const usersRouter = Router();
 
 const ROLES = ['CHAUFFEUR', 'MECANICIEN', 'SUPERVISEUR', 'ADMIN', 'SUPER_ADMIN', 'SUPERVISEUR_CONTENEURS'] as const;
 
+// Liste allégée des chauffeurs (id, nom, camion) — utilisée pour les menus
+// déroulants d'assignation (conteneurs, flotte...). Volontairement plus
+// permissive que le reste de la gestion des utilisateurs : plusieurs rôles
+// ont besoin de choisir un chauffeur sans avoir accès à la gestion complète
+// des comptes. Doit être déclarée AVANT le verrou SUPER_ADMIN ci-dessous.
+usersRouter.get(
+  '/drivers',
+  requireAuth,
+  requireRole('ADMIN', 'SUPER_ADMIN', 'SUPERVISEUR', 'SUPERVISEUR_CONTENEURS'),
+  async (_req, res) => {
+    const { rows } = await pool.query(
+      `SELECT id, name, "camionAssigne" FROM users WHERE role = 'CHAUFFEUR' AND "isActive" = true ORDER BY name ASC`
+    );
+    res.json(rows);
+  }
+);
+
 usersRouter.use(requireAuth, requireRole('SUPER_ADMIN'));
 
 usersRouter.get('/', async (_req, res) => {
