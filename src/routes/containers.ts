@@ -4,6 +4,7 @@ import { pool, withTransaction } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { withReferenceNumberRetry } from '../lib/referenceNumber.js';
 import { CONTAINER_PIPELINE_STEPS } from '../lib/containerPipeline.js';
+import { findOrCreateCurrentReport } from '../lib/weeklyReportHelper.js';
 
 export const containersRouter = Router();
 containersRouter.use(requireAuth);
@@ -40,9 +41,10 @@ containersRouter.get('/', async (req, res) => {
 async function fetchFullContainer(id: string) {
   const containerRes = await pool.query(
     `SELECT c.*, sd.nom AS "subcontractorNom", sd.telephone AS "subcontractorTelephone",
-            sd."nomEntreprise" AS "subcontractorEntreprise", u.name AS "driverNom"
+            sc.nom AS "subcontractorEntreprise", u.name AS "driverNom"
      FROM containers c
      LEFT JOIN subcontractor_drivers sd ON sd.id = c."assignedSubcontractorId"
+     LEFT JOIN subcontractor_companies sc ON sc.id = sd."companyId"
      LEFT JOIN users u ON u.id = c."assignedDriverId"
      WHERE c.id = $1`,
     [id]
@@ -54,7 +56,7 @@ async function fetchFullContainer(id: string) {
     pool.query(`SELECT s.*, u.name AS "agentNom" FROM container_pipeline_steps s LEFT JOIN users u ON u.id = s."agentResponsibleId" WHERE s."containerId" = $1 ORDER BY s."stepNumber" ASC`, [id]),
     pool.query(`SELECT d.*, u.name AS "uploadedByNom" FROM container_documents d LEFT JOIN users u ON u.id = d."uploadedById" WHERE d."containerId" = $1 ORDER BY d."uploadedAt" DESC`, [id]),
     pool.query(`SELECT * FROM pod_records WHERE "containerId" = $1 ORDER BY "createdAt" DESC`, [id]),
-    pool.query(`SELECT * FROM container_returns WHERE "containerId" = $1`, [id]),
+    pool.query(`SELECT r.*, u.name AS "filledByNom" FROM container_returns r LEFT JOIN users u ON u.id = r."filledById" WHERE r."containerId" = $1`, [id]),
   ]);
 
   return {
@@ -66,12 +68,36 @@ async function fetchFullContainer(id: string) {
   };
 }
 
+// ------------------------------------------------------------------
+// CONTENEURS DISPONIBLES POUR RETOUR : le "pool ouvert". Une fois la
+// preuve de livraison faite, N'IMPORTE QUEL chauffeur peut ramener le
+// conteneur vide au port — pas seulement celui qui a livré. Doit être
+// déclaré AVANT /:id pour ne pas être intercepté par cette route.
+// ------------------------------------------------------------------
+containersRouter.get('/pending-return', async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT DISTINCT c.*, sd.nom AS "subcontractorNom", u.name AS "driverNom"
+     FROM containers c
+     JOIN pod_records p ON p."containerId" = c.id
+     LEFT JOIN subcontractor_drivers sd ON sd.id = c."assignedSubcontractorId"
+     LEFT JOIN users u ON u.id = c."assignedDriverId"
+     WHERE c.status = 'OUVERT'
+     ORDER BY c."createdAt" DESC`
+  );
+  res.json(rows);
+});
+
 containersRouter.get('/:id', async (req, res) => {
   const full = await fetchFullContainer(req.params.id);
   if (!full) return res.status(404).json({ error: 'Conteneur introuvable' });
 
+  // Un chauffeur peut voir un conteneur qui lui est assigné (livraison à
+  // faire), OU un conteneur déjà livré (pool ouvert de retour à vide).
   if (req.user!.role === 'CHAUFFEUR' && full.assignedDriverId !== req.user!.sub) {
-    return res.status(403).json({ error: 'Accès refusé' });
+    const hasPod = full.pod && full.pod.length > 0;
+    if (!hasPod) {
+      return res.status(403).json({ error: 'Accès refusé' });
+    }
   }
   res.json(full);
 });
@@ -86,6 +112,7 @@ const createSchema = z.object({
   terminal: z.string().min(1),
   containerNumber: z.string().min(1),
   size: z.enum(['20', '40']),
+  dateLimiteRetour: z.string().optional(),
   notes: z.string().optional(),
 });
 
@@ -97,10 +124,10 @@ containersRouter.post('/', requireRole(...CONTAINER_STAFF), async (req, res) => 
   const containerId = await withReferenceNumberRetry('CONT', async (numeroReference) =>
     withTransaction(async (client) => {
       const { rows } = await client.query(
-        `INSERT INTO containers (id, "numeroReference", "blNumber", port, terminal, "containerNumber", size, "createdById", notes)
-         VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO containers (id, "numeroReference", "blNumber", port, terminal, "containerNumber", size, "dateLimiteRetour", "createdById", notes)
+         VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING id`,
-        [numeroReference, d.blNumber, d.port, d.terminal, d.containerNumber, d.size, req.user!.sub, d.notes ?? null]
+        [numeroReference, d.blNumber, d.port, d.terminal, d.containerNumber, d.size, d.dateLimiteRetour ?? null, req.user!.sub, d.notes ?? null]
       );
       const id = rows[0].id;
 
@@ -117,6 +144,19 @@ containersRouter.post('/', requireRole(...CONTAINER_STAFF), async (req, res) => 
 
   const full = await fetchFullContainer(containerId);
   res.status(201).json(full);
+});
+
+containersRouter.patch('/:id/deadline', requireRole(...CONTAINER_STAFF), async (req, res) => {
+  const dateLimiteRetour = req.body?.dateLimiteRetour;
+  if (typeof dateLimiteRetour !== 'string' || !dateLimiteRetour) {
+    return res.status(400).json({ error: 'Date invalide' });
+  }
+  const { rows } = await pool.query(
+    `UPDATE containers SET "dateLimiteRetour" = $1 WHERE id = $2 RETURNING *`,
+    [dateLimiteRetour, req.params.id]
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'Conteneur introuvable' });
+  res.json(rows[0]);
 });
 
 // ------------------------------------------------------------------
@@ -167,7 +207,9 @@ containersRouter.patch('/:id/assign', requireRole(...CONTAINER_STAFF), async (re
 // ------------------------------------------------------------------
 const stepUpdateSchema = z.object({
   status: z.enum(['PENDING', 'IN_PROGRESS', 'DONE', 'BLOCKED']).optional(),
-  dateDone: z.string().optional(),
+  dateDone: z.string().refine((v) => v <= new Date().toISOString().split('T')[0], {
+    message: 'Cette date ne peut pas être dans le futur.',
+  }).optional(),
   notes: z.string().optional(),
   details: z.record(z.any()).optional(),
 });
@@ -230,11 +272,16 @@ containersRouter.patch('/:id/documents/:docId/status', requireRole(...CONTAINER_
 });
 
 // ------------------------------------------------------------------
-// RETOUR DU CONTENEUR VIDE : ferme la vie du conteneur.
+// RETOUR DU CONTENEUR VIDE : ferme la vie du conteneur. Ne peut se faire
+// qu'APRÈS la preuve de livraison (pipeline respecté), et n'importe quel
+// chauffeur peut s'en charger — pas seulement celui qui a livré.
 // ------------------------------------------------------------------
 const returnSchema = z.object({
-  dateRetourVide: z.string(),
+  dateRetourVide: z.string().refine((v) => v <= new Date().toISOString().split('T')[0], {
+    message: "La date de retour ne peut pas être dans le futur.",
+  }),
   depotRetour: z.string().min(1),
+  fraisRetourFCFA: z.number().nonnegative().default(0),
   photoUrl: z.string().optional(),
   notes: z.string().optional(),
 });
@@ -244,21 +291,31 @@ containersRouter.post('/:id/return', requireRole(...CONTAINER_STAFF, 'CHAUFFEUR'
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Données invalides' });
   const d = parsed.data;
 
-  const existing = await pool.query(`SELECT status, "assignedDriverId" FROM containers WHERE id = $1`, [req.params.id]);
+  const existing = await pool.query(
+    `SELECT status, "blNumber", "containerNumber", size FROM containers WHERE id = $1`,
+    [req.params.id]
+  );
   if (!existing.rows[0]) return res.status(404).json({ error: 'Conteneur introuvable' });
   if (existing.rows[0].status === 'FERME') {
     return res.status(409).json({ error: 'Ce conteneur est déjà clôturé.' });
   }
-  // Un chauffeur ne peut clôturer que les conteneurs qui lui sont assignés.
-  if (req.user!.role === 'CHAUFFEUR' && existing.rows[0].assignedDriverId !== req.user!.sub) {
-    return res.status(403).json({ error: "Ce conteneur ne vous est pas assigné." });
+
+  // Étape obligatoire du pipeline : la preuve de livraison (conteneur plein)
+  // doit exister avant qu'un retour (conteneur vide) puisse être enregistré.
+  const podCheck = await pool.query(`SELECT id FROM pod_records WHERE "containerId" = $1 LIMIT 1`, [req.params.id]);
+  if (podCheck.rows.length === 0) {
+    return res.status(409).json({
+      error: "La preuve de livraison doit d'abord être complétée pour ce conteneur avant de pouvoir enregistrer son retour.",
+    });
   }
+
+  const isSelfFiled = req.user!.role === 'CHAUFFEUR';
 
   await withTransaction(async (client) => {
     await client.query(
-      `INSERT INTO container_returns (id, "containerId", "dateRetourVide", "depotRetour", "photoUrl", notes, "filledById")
-       VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6)`,
-      [req.params.id, d.dateRetourVide, d.depotRetour, d.photoUrl ?? null, d.notes ?? null, req.user!.sub]
+      `INSERT INTO container_returns (id, "containerId", "dateRetourVide", "depotRetour", "fraisRetourFCFA", "photoUrl", notes, "filledById")
+       VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7)`,
+      [req.params.id, d.dateRetourVide, d.depotRetour, d.fraisRetourFCFA, d.photoUrl ?? null, d.notes ?? null, req.user!.sub]
     );
     await client.query(`UPDATE containers SET status = 'FERME', "closedAt" = now() WHERE id = $1`, [req.params.id]);
     await client.query(
@@ -266,6 +323,24 @@ containersRouter.post('/:id/return', requireRole(...CONTAINER_STAFF, 'CHAUFFEUR'
        WHERE "containerId" = $3 AND "stepNumber" = 10`,
       [d.dateRetourVide, req.user!.sub, req.params.id]
     );
+
+    // Remplissage automatique du journal hebdomadaire du chauffeur — c'est
+    // précisément ce qui manquait sur le papier : le retour est maintenant
+    // tracé immédiatement, sans effort supplémentaire du chauffeur.
+    if (isSelfFiled) {
+      const reportId = await findOrCreateCurrentReport(client, req.user!.sub, req.user!.name);
+      await client.query(
+        `INSERT INTO trip_log_entries
+          (id, "reportId", date, client, "noConteneurBL", "typeConteneur", depart, destination, "kmParcourus", "carburantL", "fraisRoute")
+         VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, 0, 0, 0)`,
+        [
+          reportId, d.dateRetourVide, 'Retour Conteneur Vide',
+          existing.rows[0].containerNumber || existing.rows[0].blNumber,
+          existing.rows[0].size === '40' ? '40' : '20',
+          'Site de livraison', d.depotRetour,
+        ]
+      );
+    }
   });
 
   const full = await fetchFullContainer(req.params.id);
@@ -284,8 +359,20 @@ containersRouter.get('/:id/report', async (req, res) => {
   const closedAt = full.closedAt ? new Date(full.closedAt) : new Date();
   const totalDays = Math.max(0, Math.round((closedAt.getTime() - openedAt.getTime()) / 86_400_000));
 
+  // Suivi de détention : combien de jours au-delà (ou avant) la date limite
+  // de retour — directement lié au problème de coûts de détention non maîtrisés.
+  let detentionJours: number | null = null;
+  let detentionStatut: 'DANS_LES_DELAIS' | 'EN_RETARD' | 'NON_DEFINI' = 'NON_DEFINI';
+  if (full.dateLimiteRetour) {
+    const limite = new Date(full.dateLimiteRetour);
+    const reference = full.closedAt ? new Date(full.closedAt) : new Date();
+    detentionJours = Math.round((reference.getTime() - limite.getTime()) / 86_400_000);
+    detentionStatut = detentionJours > 0 ? 'EN_RETARD' : 'DANS_LES_DELAIS';
+  }
+
   const dutyStep = full.steps.find((s: any) => s.stepNumber === 3);
   const montantDroitsTaxes = Number(dutyStep?.details?.montantFCFA ?? 0);
+  const montantFraisRetour = Number(full.return?.fraisRetourFCFA ?? 0);
 
   const carrierLabel =
     full.carrierType === 'CHAUFFEUR_INTERNE'
@@ -293,6 +380,10 @@ containersRouter.get('/:id/report', async (req, res) => {
       : full.carrierType === 'SOUS_TRAITANT'
       ? `${full.subcontractorNom || 'Sous-traitant'} (${full.subcontractorEntreprise || 'société non renseignée'})`
       : 'Non assigné';
+
+  // Le retour peut être fait par un chauffeur différent de celui qui a
+  // livré (pool ouvert) — les deux sont donc rapportés séparément.
+  const retourParLabel = full.return?.filledByNom || null;
 
   res.json({
     container: {
@@ -304,6 +395,11 @@ containersRouter.get('/:id/report', async (req, res) => {
       terminal: full.terminal,
       size: full.size,
       status: full.status,
+      dateLimiteRetour: full.dateLimiteRetour,
+    },
+    detention: {
+      jours: detentionJours,
+      statut: detentionStatut,
     },
     isOuvert: full.status === 'OUVERT',
     dateOuverture: full.createdAt,
@@ -313,7 +409,10 @@ containersRouter.get('/:id/report', async (req, res) => {
       type: full.carrierType,
       label: carrierLabel,
     },
+    retourPar: retourParLabel,
     montantDroitsTaxesFCFA: montantDroitsTaxes,
+    montantFraisRetourFCFA: montantFraisRetour,
+    montantTotalFCFA: montantDroitsTaxes + montantFraisRetour,
     stepsCompleted: full.steps.filter((s: any) => s.status === 'DONE').length,
     stepsTotal: full.steps.length,
     stepsBlocked: full.steps.filter((s: any) => s.status === 'BLOCKED').length,
