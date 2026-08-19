@@ -87,6 +87,47 @@ containersRouter.get('/pending-return', async (req, res) => {
   res.json(rows);
 });
 
+// ------------------------------------------------------------------
+// CONTENEURS EN ATTENTE DE LIVRAISON : assignés au chauffeur, encore
+// ouverts, et n'ayant PAS ENCORE de preuve de livraison. C'est cette
+// liste — pas la liste générale des conteneurs assignés — qui doit
+// alimenter le formulaire de création de POD, pour qu'un conteneur déjà
+// livré ne puisse plus être "livré" une seconde fois.
+// ------------------------------------------------------------------
+containersRouter.get('/pending-delivery', requireRole('CHAUFFEUR'), async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT c.* FROM containers c
+     WHERE c.status = 'OUVERT'
+       AND c."assignedDriverId" = $1
+       AND NOT EXISTS (SELECT 1 FROM pod_records p WHERE p."containerId" = c.id)
+     ORDER BY c."createdAt" DESC`,
+    [req.user!.sub]
+  );
+  res.json(rows);
+});
+
+// ------------------------------------------------------------------
+// HISTORIQUE DES RETOURS : un chauffeur voit les retours qu'il a
+// lui-même effectués ; le personnel conteneur voit tout.
+// ------------------------------------------------------------------
+containersRouter.get('/returns-history', async (req, res) => {
+  const isDriver = req.user!.role === 'CHAUFFEUR';
+  const { rows } = await pool.query(
+    isDriver
+      ? `SELECT r.*, c."numeroReference" AS "containerNumeroReference", c."containerNumber", c."blNumber", c.port, c.terminal, c.size
+         FROM container_returns r
+         JOIN containers c ON c.id = r."containerId"
+         WHERE r."filledById" = $1
+         ORDER BY r."createdAt" DESC`
+      : `SELECT r.*, c."numeroReference" AS "containerNumeroReference", c."containerNumber", c."blNumber", c.port, c.terminal, c.size
+         FROM container_returns r
+         JOIN containers c ON c.id = r."containerId"
+         ORDER BY r."createdAt" DESC`,
+    isDriver ? [req.user!.sub] : []
+  );
+  res.json(rows);
+});
+
 containersRouter.get('/:id', async (req, res) => {
   const full = await fetchFullContainer(req.params.id);
   if (!full) return res.status(404).json({ error: 'Conteneur introuvable' });
@@ -331,13 +372,13 @@ containersRouter.post('/:id/return', requireRole(...CONTAINER_STAFF, 'CHAUFFEUR'
       const reportId = await findOrCreateCurrentReport(client, req.user!.sub, req.user!.name);
       await client.query(
         `INSERT INTO trip_log_entries
-          (id, "reportId", date, client, "noConteneurBL", "typeConteneur", depart, destination, "kmParcourus", "carburantL", "fraisRoute")
-         VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, 0, 0, 0)`,
+          (id, "reportId", date, client, "noConteneurBL", "typeConteneur", depart, destination, "kmParcourus", "carburantL", "fraisRoute", source)
+         VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, 0, 0, $8, 'RETOUR_CONTENEUR')`,
         [
           reportId, d.dateRetourVide, 'Retour Conteneur Vide',
           existing.rows[0].containerNumber || existing.rows[0].blNumber,
           existing.rows[0].size === '40' ? '40' : '20',
-          'Site de livraison', d.depotRetour,
+          'Site de livraison', d.depotRetour, d.fraisRetourFCFA,
         ]
       );
     }

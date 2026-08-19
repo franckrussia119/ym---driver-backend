@@ -112,8 +112,8 @@ podRouter.post('/', requireRole('CHAUFFEUR', 'SUPERVISEUR_CONTENEURS', 'ADMIN', 
       const reportId = await findOrCreateCurrentReport(client, driverId!, driverName);
       const { rows: tripRows } = await client.query(
         `INSERT INTO trip_log_entries
-          (id, "reportId", date, client, "noConteneurBL", "typeConteneur", depart, destination, "kmParcourus", "carburantL", "fraisRoute")
-         VALUES (gen_random_uuid()::text, $1, $2, $3, $4, 'Autre', $5, $6, $7, 0, $8)
+          (id, "reportId", date, client, "noConteneurBL", "typeConteneur", depart, destination, "kmParcourus", "carburantL", "fraisRoute", source)
+         VALUES (gen_random_uuid()::text, $1, $2, $3, $4, 'Autre', $5, $6, $7, 0, $8, 'POD')
          RETURNING id`,
         [
           reportId, d.dateTime.split(' ')[0] || new Date().toISOString().split('T')[0],

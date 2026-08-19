@@ -191,7 +191,7 @@ reportsRouter.patch('/:id', requireRole('CHAUFFEUR'), async (req, res) => {
         req.params.id,
       ]
     );
-    await client.query(`DELETE FROM trip_log_entries WHERE "reportId" = $1`, [req.params.id]);
+    await client.query(`DELETE FROM trip_log_entries WHERE "reportId" = $1 AND source = 'MANUEL'`, [req.params.id]);
     await client.query(`DELETE FROM inspection_defect_items WHERE "reportId" = $1`, [req.params.id]);
     await client.query(`DELETE FROM photo_evidence WHERE "reportId" = $1`, [req.params.id]);
     await client.query(`DELETE FROM audio_notes WHERE "reportId" = $1`, [req.params.id]);
@@ -210,8 +210,8 @@ async function insertNestedRows(
   for (const t of d.trips) {
     await client.query(
       `INSERT INTO trip_log_entries
-        (id, "reportId", date, client, "noConteneurBL", "typeConteneur", depart, destination, "kmParcourus", "carburantL", "fraisRoute")
-       VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        (id, "reportId", date, client, "noConteneurBL", "typeConteneur", depart, destination, "kmParcourus", "carburantL", "fraisRoute", source)
+       VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'MANUEL')`,
       [reportId, t.date, t.client, t.noConteneurBL, t.typeConteneur, t.depart, t.destination, t.kmParcourus, t.carburantL, t.fraisRoute]
     );
   }
