@@ -211,6 +211,34 @@ containersRouter.patch('/:id/deadline', requireRole(...CONTAINER_STAFF), async (
   res.json(rows[0]);
 });
 
+// Frais de dépôt et frais supplémentaires — distincts des droits/taxes
+// (étape 3 du pipeline) et des frais de retour (formulaire de retour), pour
+// que le coût total reflète vraiment tout ce qui a été dépensé.
+const feesSchema = z.object({
+  fraisDepotFCFA: z.number().nonnegative().optional(),
+  fraisSupplementairesFCFA: z.number().nonnegative().optional(),
+  fraisSupplementairesNote: z.string().optional(),
+});
+
+containersRouter.patch('/:id/fees', requireRole(...CONTAINER_STAFF), async (req, res) => {
+  const parsed = feesSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Données invalides' });
+  const d = parsed.data;
+
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  let i = 1;
+  if (d.fraisDepotFCFA !== undefined) { sets.push(`"fraisDepotFCFA" = $${i++}`); values.push(d.fraisDepotFCFA); }
+  if (d.fraisSupplementairesFCFA !== undefined) { sets.push(`"fraisSupplementairesFCFA" = $${i++}`); values.push(d.fraisSupplementairesFCFA); }
+  if (d.fraisSupplementairesNote !== undefined) { sets.push(`"fraisSupplementairesNote" = $${i++}`); values.push(d.fraisSupplementairesNote); }
+  if (sets.length === 0) return res.status(400).json({ error: 'Aucune modification fournie' });
+  values.push(req.params.id);
+
+  const { rows } = await pool.query(`UPDATE containers SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`, values);
+  if (!rows[0]) return res.status(404).json({ error: 'Conteneur introuvable' });
+  res.json(rows[0]);
+});
+
 // ------------------------------------------------------------------
 // ASSIGNATION du transporteur : notre chauffeur OU un sous-traitant.
 // ------------------------------------------------------------------
@@ -411,6 +439,22 @@ containersRouter.get('/:id/report', async (req, res) => {
   const closedAt = full.closedAt ? new Date(full.closedAt) : new Date();
   const totalDays = Math.max(0, Math.round((closedAt.getTime() - openedAt.getTime()) / 86_400_000));
 
+  // Détention réelle côté client : du jour où le conteneur a été livré
+  // (preuve de livraison) jusqu'au jour où sa vie est terminée (retour) —
+  // c'est la période qui compte vraiment pour la détention/surestarie,
+  // distincte du temps administratif avant livraison.
+  let joursDetentionClient: number | null = null;
+  let dateLivraisonClient: string | null = null;
+  if (full.pod.length > 0) {
+    const earliestPod = [...full.pod].sort(
+      (a: any, b: any) => new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime()
+    )[0];
+    dateLivraisonClient = earliestPod.dateTime;
+    const livraisonAt = new Date(earliestPod.dateTime);
+    const referenceAt = full.closedAt ? new Date(full.closedAt) : new Date();
+    joursDetentionClient = Math.max(0, Math.round((referenceAt.getTime() - livraisonAt.getTime()) / 86_400_000));
+  }
+
   // Suivi de détention : combien de jours au-delà (ou avant) la date limite
   // de retour — directement lié au problème de coûts de détention non maîtrisés.
   let detentionJours: number | null = null;
@@ -425,6 +469,8 @@ containersRouter.get('/:id/report', async (req, res) => {
   const dutyStep = full.steps.find((s: any) => s.stepNumber === 3);
   const montantDroitsTaxes = Number(dutyStep?.details?.montantFCFA ?? 0);
   const montantFraisRetour = Number(full.return?.fraisRetourFCFA ?? 0);
+  const montantFraisDepot = Number(full.fraisDepotFCFA ?? 0);
+  const montantFraisSupplementaires = Number(full.fraisSupplementairesFCFA ?? 0);
 
   const carrierLabel =
     full.carrierType === 'CHAUFFEUR_INTERNE'
@@ -457,6 +503,8 @@ containersRouter.get('/:id/report', async (req, res) => {
     dateOuverture: full.createdAt,
     dateFermeture: full.closedAt,
     totalDays,
+    dateLivraisonClient,
+    joursDetentionClient,
     carrier: {
       type: full.carrierType,
       label: carrierLabel,
@@ -464,7 +512,10 @@ containersRouter.get('/:id/report', async (req, res) => {
     retourPar: retourParLabel,
     montantDroitsTaxesFCFA: montantDroitsTaxes,
     montantFraisRetourFCFA: montantFraisRetour,
-    montantTotalFCFA: montantDroitsTaxes + montantFraisRetour,
+    montantFraisDepotFCFA: montantFraisDepot,
+    montantFraisSupplementairesFCFA: montantFraisSupplementaires,
+    fraisSupplementairesNote: full.fraisSupplementairesNote ?? null,
+    montantTotalFCFA: montantDroitsTaxes + montantFraisRetour + montantFraisDepot + montantFraisSupplementaires,
     stepsCompleted: full.steps.filter((s: any) => s.status === 'DONE').length,
     stepsTotal: full.steps.length,
     stepsBlocked: full.steps.filter((s: any) => s.status === 'BLOCKED').length,
