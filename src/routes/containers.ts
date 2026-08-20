@@ -20,16 +20,18 @@ containersRouter.get('/', async (req, res) => {
   const isDriver = req.user!.role === 'CHAUFFEUR';
   const { rows } = await pool.query(
     isDriver
-      ? `SELECT c.*, sd.nom AS "subcontractorNom", u.name AS "driverNom", creator.name AS "createdByNom"
+      ? `SELECT c.*, sd.nom AS "subcontractorNom", sc.nom AS "subcontractorEntreprise", u.name AS "driverNom", creator.name AS "createdByNom"
          FROM containers c
          LEFT JOIN subcontractor_drivers sd ON sd.id = c."assignedSubcontractorId"
+         LEFT JOIN subcontractor_companies sc ON sc.id = sd."companyId"
          LEFT JOIN users u ON u.id = c."assignedDriverId"
          LEFT JOIN users creator ON creator.id = c."createdById"
          WHERE c."assignedDriverId" = $1
          ORDER BY c."createdAt" DESC`
-      : `SELECT c.*, sd.nom AS "subcontractorNom", u.name AS "driverNom", creator.name AS "createdByNom"
+      : `SELECT c.*, sd.nom AS "subcontractorNom", sc.nom AS "subcontractorEntreprise", u.name AS "driverNom", creator.name AS "createdByNom"
          FROM containers c
          LEFT JOIN subcontractor_drivers sd ON sd.id = c."assignedSubcontractorId"
+         LEFT JOIN subcontractor_companies sc ON sc.id = sd."companyId"
          LEFT JOIN users u ON u.id = c."assignedDriverId"
          LEFT JOIN users creator ON creator.id = c."createdById"
          ORDER BY c."createdAt" DESC`,
@@ -94,14 +96,23 @@ containersRouter.get('/pending-return', async (req, res) => {
 // alimenter le formulaire de création de POD, pour qu'un conteneur déjà
 // livré ne puisse plus être "livré" une seconde fois.
 // ------------------------------------------------------------------
-containersRouter.get('/pending-delivery', requireRole('CHAUFFEUR'), async (req, res) => {
+containersRouter.get('/pending-delivery', requireRole('CHAUFFEUR', ...CONTAINER_STAFF), async (req, res) => {
+  const isDriver = req.user!.role === 'CHAUFFEUR';
   const { rows } = await pool.query(
-    `SELECT c.* FROM containers c
-     WHERE c.status = 'OUVERT'
-       AND c."assignedDriverId" = $1
-       AND NOT EXISTS (SELECT 1 FROM pod_records p WHERE p."containerId" = c.id)
-     ORDER BY c."createdAt" DESC`,
-    [req.user!.sub]
+    isDriver
+      ? `SELECT c.* FROM containers c
+         WHERE c.status = 'OUVERT'
+           AND c."assignedDriverId" = $1
+           AND NOT EXISTS (SELECT 1 FROM pod_records p WHERE p."containerId" = c.id)
+         ORDER BY c."createdAt" DESC`
+      : `SELECT c.*, sd.nom AS "subcontractorNom", sc.nom AS "subcontractorEntreprise" FROM containers c
+         JOIN subcontractor_drivers sd ON sd.id = c."assignedSubcontractorId"
+         LEFT JOIN subcontractor_companies sc ON sc.id = sd."companyId"
+         WHERE c.status = 'OUVERT'
+           AND c."carrierType" = 'SOUS_TRAITANT'
+           AND NOT EXISTS (SELECT 1 FROM pod_records p WHERE p."containerId" = c.id)
+         ORDER BY c."createdAt" DESC`,
+    isDriver ? [req.user!.sub] : []
   );
   res.json(rows);
 });

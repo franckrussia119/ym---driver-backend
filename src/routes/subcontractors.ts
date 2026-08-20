@@ -130,3 +130,89 @@ subcontractorsRouter.patch('/drivers/:id', requireRole(...CONTAINER_ROLES), asyn
   if (!rows[0]) return res.status(404).json({ error: 'Chauffeur introuvable' });
   res.json(rows[0]);
 });
+
+// ------------------------------------------------------------------
+// ANALYSE : société sous-traitante (vue d'ensemble + tous ses chauffeurs)
+// ------------------------------------------------------------------
+subcontractorsRouter.get('/companies/:id/analysis', requireRole(...CONTAINER_ROLES), async (req, res) => {
+  const companyRes = await pool.query(`SELECT * FROM subcontractor_companies WHERE id = $1`, [req.params.id]);
+  const company = companyRes.rows[0];
+  if (!company) return res.status(404).json({ error: 'Société introuvable' });
+
+  const driversRes = await pool.query(
+    `SELECT * FROM subcontractor_drivers WHERE "companyId" = $1 ORDER BY nom ASC`,
+    [req.params.id]
+  );
+  const driverIds = driversRes.rows.map((d: any) => d.id);
+
+  if (driverIds.length === 0) {
+    return res.json({ company, drivers: [], containers: [], pod: [], stats: { totalContainers: 0, ouverts: 0, fermes: 0, totalLivraisons: 0, totalMontantRecuFCFA: 0 } });
+  }
+
+  const [containersRes, podRes] = await Promise.all([
+    pool.query(
+      `SELECT c.*, sd.nom AS "subcontractorNom" FROM containers c
+       JOIN subcontractor_drivers sd ON sd.id = c."assignedSubcontractorId"
+       WHERE c."assignedSubcontractorId" = ANY($1::text[])
+       ORDER BY c."createdAt" DESC`,
+      [driverIds]
+    ),
+    pool.query(
+      `SELECT p.*, sd.nom AS "subcontractorDriverNom" FROM pod_records p
+       JOIN subcontractor_drivers sd ON sd.id = p."subcontractorDriverId"
+       WHERE p."subcontractorDriverId" = ANY($1::text[])
+       ORDER BY p."createdAt" DESC`,
+      [driverIds]
+    ),
+  ]);
+
+  const containers = containersRes.rows;
+  const pod = podRes.rows;
+  const stats = {
+    totalContainers: containers.length,
+    ouverts: containers.filter((c: any) => c.status === 'OUVERT').length,
+    fermes: containers.filter((c: any) => c.status === 'FERME').length,
+    totalLivraisons: pod.length,
+    totalMontantRecuFCFA: pod.reduce((sum: number, p: any) => sum + Number(p.montantRecuFCFA || 0), 0),
+  };
+
+  res.json({ company, drivers: driversRes.rows, containers, pod, stats });
+});
+
+// ------------------------------------------------------------------
+// ANALYSE : chauffeur sous-traitant individuel (son propre historique)
+// ------------------------------------------------------------------
+subcontractorsRouter.get('/drivers/:id/analysis', requireRole(...CONTAINER_ROLES), async (req, res) => {
+  const driverRes = await pool.query(
+    `SELECT sd.*, sc.nom AS "companyNom" FROM subcontractor_drivers sd
+     LEFT JOIN subcontractor_companies sc ON sc.id = sd."companyId"
+     WHERE sd.id = $1`,
+    [req.params.id]
+  );
+  const driver = driverRes.rows[0];
+  if (!driver) return res.status(404).json({ error: 'Chauffeur introuvable' });
+
+  const [containersRes, podRes, returnsRes] = await Promise.all([
+    pool.query(`SELECT * FROM containers WHERE "assignedSubcontractorId" = $1 ORDER BY "createdAt" DESC`, [req.params.id]),
+    pool.query(`SELECT * FROM pod_records WHERE "subcontractorDriverId" = $1 ORDER BY "createdAt" DESC`, [req.params.id]),
+    pool.query(
+      `SELECT r.*, c."containerNumber", c."blNumber" FROM container_returns r
+       JOIN containers c ON c.id = r."containerId"
+       WHERE c."assignedSubcontractorId" = $1
+       ORDER BY r."createdAt" DESC`,
+      [req.params.id]
+    ),
+  ]);
+
+  const containers = containersRes.rows;
+  const pod = podRes.rows;
+  const stats = {
+    totalContainers: containers.length,
+    ouverts: containers.filter((c: any) => c.status === 'OUVERT').length,
+    fermes: containers.filter((c: any) => c.status === 'FERME').length,
+    totalLivraisons: pod.length,
+    totalMontantRecuFCFA: pod.reduce((sum: number, p: any) => sum + Number(p.montantRecuFCFA || 0), 0),
+  };
+
+  res.json({ driver, containers, pod, returns: returnsRes.rows, stats });
+});
