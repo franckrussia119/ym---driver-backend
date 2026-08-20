@@ -19,7 +19,7 @@ usersRouter.get(
   requireRole('ADMIN', 'SUPER_ADMIN', 'SUPERVISEUR', 'SUPERVISEUR_CONTENEURS'),
   async (_req, res) => {
     const { rows } = await pool.query(
-      `SELECT id, name, "camionAssigne" FROM users WHERE role = 'CHAUFFEUR' AND "isActive" = true ORDER BY name ASC`
+      `SELECT id, name, "camionAssigne", telephone FROM users WHERE role = 'CHAUFFEUR' AND "isActive" = true ORDER BY name ASC`
     );
     res.json(rows);
   }
@@ -29,7 +29,7 @@ usersRouter.use(requireAuth, requireRole('SUPER_ADMIN'));
 
 usersRouter.get('/', async (_req, res) => {
   const { rows } = await pool.query(
-    `SELECT id, name, email, role, "isActive", "camionAssigne", "driverPhotoUrl",
+    `SELECT id, name, email, role, "isActive", "camionAssigne", "driverPhotoUrl", telephone,
             "truckPhotoUrl", "habiliteMatieresDangereuses", "createdAt"
      FROM users ORDER BY "createdAt" ASC`
   );
@@ -42,6 +42,7 @@ const createUserSchema = z.object({
   password: z.string().min(6, 'Le mot de passe doit contenir au moins 6 caractères'),
   role: z.enum(ROLES),
   camionAssigne: z.string().optional(),
+  telephone: z.string().optional(),
   habiliteMatieresDangereuses: z.boolean().optional(),
 });
 
@@ -50,7 +51,7 @@ usersRouter.post('/', async (req, res) => {
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Données invalides' });
   }
-  const { name, email, password, role, camionAssigne, habiliteMatieresDangereuses } = parsed.data;
+  const { name, email, password, role, camionAssigne, telephone, habiliteMatieresDangereuses } = parsed.data;
 
   const existing = await pool.query(`SELECT id FROM users WHERE email = $1`, [email.toLowerCase()]);
   if (existing.rows[0]) {
@@ -59,10 +60,10 @@ usersRouter.post('/', async (req, res) => {
 
   const passwordHash = await hashPassword(password);
   const { rows } = await pool.query(
-    `INSERT INTO users (id, name, email, "passwordHash", role, "camionAssigne", "habiliteMatieresDangereuses")
-     VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6)
-     RETURNING id, name, email, role, "isActive", "camionAssigne", "habiliteMatieresDangereuses", "createdAt"`,
-    [name, email.toLowerCase(), passwordHash, role, camionAssigne ?? null, habiliteMatieresDangereuses ?? false]
+    `INSERT INTO users (id, name, email, "passwordHash", role, "camionAssigne", telephone, "habiliteMatieresDangereuses")
+     VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7)
+     RETURNING id, name, email, role, "isActive", "camionAssigne", telephone, "habiliteMatieresDangereuses", "createdAt"`,
+    [name, email.toLowerCase(), passwordHash, role, camionAssigne ?? null, telephone ?? null, habiliteMatieresDangereuses ?? false]
   );
   res.status(201).json(rows[0]);
 });
@@ -71,6 +72,7 @@ const updateUserSchema = z.object({
   name: z.string().min(2).optional(),
   role: z.enum(ROLES).optional(),
   camionAssigne: z.string().nullable().optional(),
+  telephone: z.string().nullable().optional(),
   habiliteMatieresDangereuses: z.boolean().optional(),
   isActive: z.boolean().optional(),
   password: z.string().min(6).optional(), // Super Admin peut réinitialiser un mot de passe
@@ -89,6 +91,7 @@ usersRouter.patch('/:id', async (req, res) => {
   if (fields.name !== undefined) { sets.push(`name = $${i++}`); values.push(fields.name); }
   if (fields.role !== undefined) { sets.push(`role = $${i++}`); values.push(fields.role); }
   if (fields.camionAssigne !== undefined) { sets.push(`"camionAssigne" = $${i++}`); values.push(fields.camionAssigne); }
+  if (fields.telephone !== undefined) { sets.push(`telephone = $${i++}`); values.push(fields.telephone); }
   if (fields.habiliteMatieresDangereuses !== undefined) { sets.push(`"habiliteMatieresDangereuses" = $${i++}`); values.push(fields.habiliteMatieresDangereuses); }
   if (fields.isActive !== undefined) { sets.push(`"isActive" = $${i++}`); values.push(fields.isActive); }
   if (fields.password !== undefined) {
@@ -102,7 +105,7 @@ usersRouter.patch('/:id', async (req, res) => {
 
   const { rows } = await pool.query(
     `UPDATE users SET ${sets.join(', ')} WHERE id = $${i}
-     RETURNING id, name, email, role, "isActive", "camionAssigne", "habiliteMatieresDangereuses"`,
+     RETURNING id, name, email, role, "isActive", "camionAssigne", telephone, "habiliteMatieresDangereuses"`,
     values
   );
   if (!rows[0]) return res.status(404).json({ error: 'Utilisateur introuvable' });

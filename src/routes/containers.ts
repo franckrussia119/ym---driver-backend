@@ -43,7 +43,7 @@ containersRouter.get('/', async (req, res) => {
 async function fetchFullContainer(id: string) {
   const containerRes = await pool.query(
     `SELECT c.*, sd.nom AS "subcontractorNom", sd.telephone AS "subcontractorTelephone",
-            sc.nom AS "subcontractorEntreprise", u.name AS "driverNom"
+            sc.nom AS "subcontractorEntreprise", u.name AS "driverNom", u.telephone AS "driverTelephone"
      FROM containers c
      LEFT JOIN subcontractor_drivers sd ON sd.id = c."assignedSubcontractorId"
      LEFT JOIN subcontractor_companies sc ON sc.id = sd."companyId"
@@ -54,11 +54,12 @@ async function fetchFullContainer(id: string) {
   const container = containerRes.rows[0];
   if (!container) return null;
 
-  const [steps, documents, pod, ret] = await Promise.all([
+  const [steps, documents, pod, ret, incidents] = await Promise.all([
     pool.query(`SELECT s.*, u.name AS "agentNom" FROM container_pipeline_steps s LEFT JOIN users u ON u.id = s."agentResponsibleId" WHERE s."containerId" = $1 ORDER BY s."stepNumber" ASC`, [id]),
     pool.query(`SELECT d.*, u.name AS "uploadedByNom" FROM container_documents d LEFT JOIN users u ON u.id = d."uploadedById" WHERE d."containerId" = $1 ORDER BY d."uploadedAt" DESC`, [id]),
     pool.query(`SELECT * FROM pod_records WHERE "containerId" = $1 ORDER BY "createdAt" DESC`, [id]),
-    pool.query(`SELECT r.*, u.name AS "filledByNom" FROM container_returns r LEFT JOIN users u ON u.id = r."filledById" WHERE r."containerId" = $1`, [id]),
+    pool.query(`SELECT r.*, u.name AS "filledByNom", u.telephone AS "filledByTelephone" FROM container_returns r LEFT JOIN users u ON u.id = r."filledById" WHERE r."containerId" = $1`, [id]),
+    pool.query(`SELECT * FROM container_incidents WHERE "containerId" = $1 ORDER BY "createdAt" ASC`, [id]),
   ]);
 
   return {
@@ -67,6 +68,7 @@ async function fetchFullContainer(id: string) {
     documents: documents.rows,
     pod: pod.rows,
     return: ret.rows[0] ?? null,
+    incidents: incidents.rows,
   };
 }
 
@@ -173,6 +175,19 @@ containersRouter.post('/', requireRole(...CONTAINER_STAFF), async (req, res) => 
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Données invalides' });
   const d = parsed.data;
 
+  // Un même BL ne peut jamais être enregistré deux fois — sinon deux
+  // conteneurs distincts se retrouveraient rattachés au même dossier de
+  // transport, faussant tout le suivi (détention, coûts, chauffeur...).
+  const existingBl = await pool.query(
+    `SELECT id, "numeroReference", "containerNumber" FROM containers WHERE lower(trim("blNumber")) = lower(trim($1))`,
+    [d.blNumber]
+  );
+  if (existingBl.rows[0]) {
+    return res.status(409).json({
+      error: `Le BL "${d.blNumber}" est déjà enregistré sur le conteneur ${existingBl.rows[0].containerNumber} (${existingBl.rows[0].numeroReference}). Un même BL ne peut pas être utilisé deux fois.`,
+    });
+  }
+
   const containerId = await withReferenceNumberRetry('CONT', async (numeroReference) =>
     withTransaction(async (client) => {
       const { rows } = await client.query(
@@ -196,6 +211,82 @@ containersRouter.post('/', requireRole(...CONTAINER_STAFF), async (req, res) => 
 
   const full = await fetchFullContainer(containerId);
   res.status(201).json(full);
+});
+
+// ------------------------------------------------------------------
+// MODIFIER : corriger une erreur de saisie (BL, N° conteneur, port...).
+// Re-vérifie l'unicité du BL si celui-ci change.
+// ------------------------------------------------------------------
+const updateSchema = z.object({
+  blNumber: z.string().min(1).optional(),
+  port: z.enum(['Douala', 'Kribi']).optional(),
+  terminal: z.string().min(1).optional(),
+  containerNumber: z.string().min(1).optional(),
+  size: z.enum(['20', '40']).optional(),
+  notes: z.string().optional(),
+});
+
+containersRouter.patch('/:id', requireRole(...CONTAINER_STAFF), async (req, res) => {
+  const parsed = updateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Données invalides' });
+  const d = parsed.data;
+
+  if (d.blNumber !== undefined) {
+    const dup = await pool.query(
+      `SELECT id, "numeroReference", "containerNumber" FROM containers
+       WHERE lower(trim("blNumber")) = lower(trim($1)) AND id != $2`,
+      [d.blNumber, req.params.id]
+    );
+    if (dup.rows[0]) {
+      return res.status(409).json({
+        error: `Le BL "${d.blNumber}" est déjà utilisé par le conteneur ${dup.rows[0].containerNumber} (${dup.rows[0].numeroReference}).`,
+      });
+    }
+  }
+
+  const colMap: Record<string, string> = {
+    blNumber: '"blNumber"', port: 'port', terminal: 'terminal',
+    containerNumber: '"containerNumber"', size: 'size', notes: 'notes',
+  };
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  let i = 1;
+  for (const [key, col] of Object.entries(colMap)) {
+    if ((d as any)[key] !== undefined) { sets.push(`${col} = $${i++}`); values.push((d as any)[key]); }
+  }
+  if (sets.length === 0) return res.status(400).json({ error: 'Aucune modification fournie' });
+  values.push(req.params.id);
+
+  const { rows } = await pool.query(`UPDATE containers SET ${sets.join(', ')} WHERE id = $${i} RETURNING id`, values);
+  if (!rows[0]) return res.status(404).json({ error: 'Conteneur introuvable' });
+
+  const full = await fetchFullContainer(req.params.id);
+  res.json(full);
+});
+
+// ------------------------------------------------------------------
+// SUPPRIMER : uniquement si rien d'opérationnel n'a encore eu lieu (aucune
+// preuve de livraison, aucun retour) — pour ne jamais effacer un
+// historique réel de chauffeur. Au-delà, seule la modification est permise.
+// ------------------------------------------------------------------
+containersRouter.delete('/:id', requireRole(...CONTAINER_STAFF), async (req, res) => {
+  const podCheck = await pool.query(`SELECT id FROM pod_records WHERE "containerId" = $1 LIMIT 1`, [req.params.id]);
+  if (podCheck.rows.length > 0) {
+    return res.status(409).json({
+      error: "Ce conteneur a déjà une preuve de livraison enregistrée — il ne peut plus être supprimé, seulement modifié, pour ne pas perdre l'historique du chauffeur.",
+    });
+  }
+
+  const deleted = await withTransaction(async (client) => {
+    await client.query(`DELETE FROM container_documents WHERE "containerId" = $1`, [req.params.id]);
+    await client.query(`DELETE FROM container_pipeline_steps WHERE "containerId" = $1`, [req.params.id]);
+    await client.query(`DELETE FROM container_returns WHERE "containerId" = $1`, [req.params.id]);
+    const { rowCount } = await client.query(`DELETE FROM containers WHERE id = $1`, [req.params.id]);
+    return (rowCount ?? 0) > 0;
+  });
+
+  if (!deleted) return res.status(404).json({ error: 'Conteneur introuvable' });
+  res.json({ success: true });
 });
 
 containersRouter.patch('/:id/deadline', requireRole(...CONTAINER_STAFF), async (req, res) => {
@@ -260,6 +351,16 @@ containersRouter.patch('/:id/assign', requireRole(...CONTAINER_STAFF), async (re
     return res.status(400).json({ error: 'Veuillez sélectionner un sous-traitant.' });
   }
 
+  // On récupère l'assignation précédente AVANT de la remplacer, pour savoir
+  // s'il s'agit d'une VRAIE réassignation (conteneur déjà confié à quelqu'un
+  // d'autre) — auquel cas on garde une trace, au lieu d'écraser silencieusement.
+  const before = await fetchFullContainer(req.params.id);
+  if (!before) return res.status(404).json({ error: 'Conteneur introuvable' });
+  const ancienChauffeurNom =
+    before.carrierType === 'CHAUFFEUR_INTERNE' ? before.driverNom
+    : before.carrierType === 'SOUS_TRAITANT' ? before.subcontractorNom
+    : null;
+
   const { rows } = await pool.query(
     `UPDATE containers SET "carrierType" = $1, "assignedDriverId" = $2, "assignedSubcontractorId" = $3 WHERE id = $4 RETURNING id`,
     [
@@ -279,7 +380,64 @@ containersRouter.patch('/:id/assign', requireRole(...CONTAINER_STAFF), async (re
   );
 
   const full = await fetchFullContainer(req.params.id);
+  const nouveauChauffeurNom =
+    full!.carrierType === 'CHAUFFEUR_INTERNE' ? full!.driverNom
+    : full!.carrierType === 'SOUS_TRAITANT' ? full!.subcontractorNom
+    : null;
+
+  if (ancienChauffeurNom && nouveauChauffeurNom && ancienChauffeurNom !== nouveauChauffeurNom) {
+    await pool.query(
+      `INSERT INTO container_incidents (id, "containerId", type, description, "ancienChauffeurNom", "nouveauChauffeurNom", "createdById", "createdByNom")
+       VALUES (gen_random_uuid()::text, $1, 'TRANSFERT', $2, $3, $4, $5, $6)`,
+      [
+        req.params.id,
+        `Conteneur réassigné de ${ancienChauffeurNom} à ${nouveauChauffeurNom}.`,
+        ancienChauffeurNom,
+        nouveauChauffeurNom,
+        req.user!.sub,
+        req.user!.name,
+      ]
+    );
+  }
+
   res.json(full);
+});
+
+// ------------------------------------------------------------------
+// INCIDENTS / TRANSFERTS : panne, transfert manuel entre chauffeurs ou
+// camions, ou tout autre événement affectant le transport — pour ne
+// jamais perdre la trace de ce qui s'est réellement passé.
+// ------------------------------------------------------------------
+const incidentSchema = z.object({
+  type: z.enum(['PANNE', 'TRANSFERT', 'AUTRE']),
+  description: z.string().min(1),
+  ancienChauffeurNom: z.string().optional(),
+  nouveauChauffeurNom: z.string().optional(),
+  ancienCamion: z.string().optional(),
+  nouveauCamion: z.string().optional(),
+});
+
+containersRouter.post('/:id/incidents', requireRole(...CONTAINER_STAFF), async (req, res) => {
+  const parsed = incidentSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Données invalides' });
+  const d = parsed.data;
+
+  const containerCheck = await pool.query(`SELECT id FROM containers WHERE id = $1`, [req.params.id]);
+  if (!containerCheck.rows[0]) return res.status(404).json({ error: 'Conteneur introuvable' });
+
+  const { rows } = await pool.query(
+    `INSERT INTO container_incidents
+      (id, "containerId", type, description, "ancienChauffeurNom", "nouveauChauffeurNom", "ancienCamion", "nouveauCamion", "createdById", "createdByNom")
+     VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9)
+     RETURNING *`,
+    [
+      req.params.id, d.type, d.description,
+      d.ancienChauffeurNom ?? null, d.nouveauChauffeurNom ?? null,
+      d.ancienCamion ?? null, d.nouveauCamion ?? null,
+      req.user!.sub, req.user!.name,
+    ]
+  );
+  res.status(201).json(rows[0]);
 });
 
 // ------------------------------------------------------------------
@@ -479,9 +637,17 @@ containersRouter.get('/:id/report', async (req, res) => {
       ? `${full.subcontractorNom || 'Sous-traitant'} (${full.subcontractorEntreprise || 'société non renseignée'})`
       : 'Non assigné';
 
+  const carrierTelephone =
+    full.carrierType === 'CHAUFFEUR_INTERNE'
+      ? full.driverTelephone || null
+      : full.carrierType === 'SOUS_TRAITANT'
+      ? full.subcontractorTelephone || null
+      : null;
+
   // Le retour peut être fait par un chauffeur différent de celui qui a
   // livré (pool ouvert) — les deux sont donc rapportés séparément.
   const retourParLabel = full.return?.filledByNom || null;
+  const retourParTelephone = full.return?.filledByTelephone || null;
 
   res.json({
     container: {
@@ -508,8 +674,21 @@ containersRouter.get('/:id/report', async (req, res) => {
     carrier: {
       type: full.carrierType,
       label: carrierLabel,
+      telephone: carrierTelephone,
     },
     retourPar: retourParLabel,
+    retourParTelephone,
+    incidents: full.incidents.map((inc: any) => ({
+      id: inc.id,
+      type: inc.type,
+      description: inc.description,
+      ancienChauffeurNom: inc.ancienChauffeurNom,
+      nouveauChauffeurNom: inc.nouveauChauffeurNom,
+      ancienCamion: inc.ancienCamion,
+      nouveauCamion: inc.nouveauCamion,
+      createdByNom: inc.createdByNom,
+      createdAt: inc.createdAt,
+    })),
     montantDroitsTaxesFCFA: montantDroitsTaxes,
     montantFraisRetourFCFA: montantFraisRetour,
     montantFraisDepotFCFA: montantFraisDepot,
