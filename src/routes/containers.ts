@@ -141,6 +141,50 @@ containersRouter.get('/returns-history', async (req, res) => {
   res.json(rows);
 });
 
+// ------------------------------------------------------------------
+// REGROUPEMENT PAR BL : un même BL peut couvrir plusieurs conteneurs.
+// Doit être déclaré AVANT /:id pour ne pas être intercepté par cette route.
+// ------------------------------------------------------------------
+containersRouter.get('/bls', requireRole(...CONTAINER_STAFF), async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT
+       "blNumber",
+       count(*)::int AS "totalContainers",
+       count(*) FILTER (WHERE status = 'OUVERT')::int AS "ouverts",
+       count(*) FILTER (WHERE status = 'FERME')::int AS "fermes",
+       min("createdAt") AS "premiereDateCreation",
+       array_agg(port) AS ports
+     FROM containers
+     GROUP BY "blNumber"
+     ORDER BY min("createdAt") DESC`
+  );
+  res.json(
+    rows.map((r: any) => ({
+      blNumber: r.blNumber,
+      totalContainers: r.totalContainers,
+      ouverts: r.ouverts,
+      fermes: r.fermes,
+      premiereDateCreation: r.premiereDateCreation,
+      ports: [...new Set(r.ports)],
+    }))
+  );
+});
+
+containersRouter.get('/bl/:blNumber', requireRole(...CONTAINER_STAFF), async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT c.*, sd.nom AS "subcontractorNom", sc.nom AS "subcontractorEntreprise", u.name AS "driverNom"
+     FROM containers c
+     LEFT JOIN subcontractor_drivers sd ON sd.id = c."assignedSubcontractorId"
+     LEFT JOIN subcontractor_companies sc ON sc.id = sd."companyId"
+     LEFT JOIN users u ON u.id = c."assignedDriverId"
+     WHERE lower(trim(c."blNumber")) = lower(trim($1))
+     ORDER BY c."createdAt" ASC`,
+    [req.params.blNumber]
+  );
+  if (rows.length === 0) return res.status(404).json({ error: 'Aucun conteneur trouvé pour ce BL' });
+  res.json(rows);
+});
+
 containersRouter.get('/:id', async (req, res) => {
   const full = await fetchFullContainer(req.params.id);
   if (!full) return res.status(404).json({ error: 'Conteneur introuvable' });
@@ -175,16 +219,19 @@ containersRouter.post('/', requireRole(...CONTAINER_STAFF), async (req, res) => 
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Données invalides' });
   const d = parsed.data;
 
-  // Un même BL ne peut jamais être enregistré deux fois — sinon deux
-  // conteneurs distincts se retrouveraient rattachés au même dossier de
-  // transport, faussant tout le suivi (détention, coûts, chauffeur...).
-  const existingBl = await pool.query(
-    `SELECT id, "numeroReference", "containerNumber" FROM containers WHERE lower(trim("blNumber")) = lower(trim($1))`,
-    [d.blNumber]
+  // Un même BL couvre souvent plusieurs conteneurs — ce n'est PAS une
+  // erreur. Ce qui doit réellement être unique, c'est le numéro de
+  // conteneur PARMI LES CONTENEURS ENCORE OUVERTS : un même conteneur
+  // physique ne peut pas être engagé sur deux dossiers actifs à la fois.
+  // Une fois fermé, son numéro redevient disponible pour un futur envoi.
+  const existingOpen = await pool.query(
+    `SELECT id, "numeroReference", "blNumber" FROM containers
+     WHERE lower(trim("containerNumber")) = lower(trim($1)) AND status = 'OUVERT'`,
+    [d.containerNumber]
   );
-  if (existingBl.rows[0]) {
+  if (existingOpen.rows[0]) {
     return res.status(409).json({
-      error: `Le BL "${d.blNumber}" est déjà enregistré sur le conteneur ${existingBl.rows[0].containerNumber} (${existingBl.rows[0].numeroReference}). Un même BL ne peut pas être utilisé deux fois.`,
+      error: `Le conteneur "${d.containerNumber}" est déjà engagé sur un dossier ouvert (BL ${existingOpen.rows[0].blNumber}, ${existingOpen.rows[0].numeroReference}). Un même conteneur ne peut pas être ouvert sur deux dossiers à la fois.`,
     });
   }
 
@@ -231,15 +278,15 @@ containersRouter.patch('/:id', requireRole(...CONTAINER_STAFF), async (req, res)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Données invalides' });
   const d = parsed.data;
 
-  if (d.blNumber !== undefined) {
+  if (d.containerNumber !== undefined) {
     const dup = await pool.query(
-      `SELECT id, "numeroReference", "containerNumber" FROM containers
-       WHERE lower(trim("blNumber")) = lower(trim($1)) AND id != $2`,
-      [d.blNumber, req.params.id]
+      `SELECT id, "numeroReference", "blNumber" FROM containers
+       WHERE lower(trim("containerNumber")) = lower(trim($1)) AND status = 'OUVERT' AND id != $2`,
+      [d.containerNumber, req.params.id]
     );
     if (dup.rows[0]) {
       return res.status(409).json({
-        error: `Le BL "${d.blNumber}" est déjà utilisé par le conteneur ${dup.rows[0].containerNumber} (${dup.rows[0].numeroReference}).`,
+        error: `Le conteneur "${d.containerNumber}" est déjà engagé sur un dossier ouvert (BL ${dup.rows[0].blNumber}, ${dup.rows[0].numeroReference}).`,
       });
     }
   }
