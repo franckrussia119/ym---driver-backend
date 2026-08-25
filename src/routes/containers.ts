@@ -212,6 +212,10 @@ const createSchema = z.object({
   size: z.enum(['20', '40']),
   dateLimiteRetour: z.string().optional(),
   notes: z.string().optional(),
+  clientNom: z.string().optional(),
+  clientContact: z.string().optional(),
+  contenuDescription: z.string().optional(),
+  destinationDechargement: z.string().optional(),
 });
 
 containersRouter.post('/', requireRole(...CONTAINER_STAFF), async (req, res) => {
@@ -238,10 +242,13 @@ containersRouter.post('/', requireRole(...CONTAINER_STAFF), async (req, res) => 
   const containerId = await withReferenceNumberRetry('CONT', async (numeroReference) =>
     withTransaction(async (client) => {
       const { rows } = await client.query(
-        `INSERT INTO containers (id, "numeroReference", "blNumber", port, terminal, "containerNumber", size, "dateLimiteRetour", "createdById", notes)
-         VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9)
+        `INSERT INTO containers (id, "numeroReference", "blNumber", port, terminal, "containerNumber", size, "dateLimiteRetour", "createdById", notes, "clientNom", "clientContact", "contenuDescription", "destinationDechargement")
+         VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          RETURNING id`,
-        [numeroReference, d.blNumber, d.port, d.terminal, d.containerNumber, d.size, d.dateLimiteRetour ?? null, req.user!.sub, d.notes ?? null]
+        [
+          numeroReference, d.blNumber, d.port, d.terminal, d.containerNumber, d.size, d.dateLimiteRetour ?? null, req.user!.sub, d.notes ?? null,
+          d.clientNom ?? null, d.clientContact ?? null, d.contenuDescription ?? null, d.destinationDechargement ?? null,
+        ]
       );
       const id = rows[0].id;
 
@@ -271,6 +278,10 @@ const updateSchema = z.object({
   containerNumber: z.string().min(1).optional(),
   size: z.enum(['20', '40']).optional(),
   notes: z.string().optional(),
+  clientNom: z.string().optional(),
+  clientContact: z.string().optional(),
+  contenuDescription: z.string().optional(),
+  destinationDechargement: z.string().optional(),
 });
 
 containersRouter.patch('/:id', requireRole(...CONTAINER_STAFF), async (req, res) => {
@@ -294,6 +305,8 @@ containersRouter.patch('/:id', requireRole(...CONTAINER_STAFF), async (req, res)
   const colMap: Record<string, string> = {
     blNumber: '"blNumber"', port: 'port', terminal: 'terminal',
     containerNumber: '"containerNumber"', size: 'size', notes: 'notes',
+    clientNom: '"clientNom"', clientContact: '"clientContact"',
+    contenuDescription: '"contenuDescription"', destinationDechargement: '"destinationDechargement"',
   };
   const sets: string[] = [];
   const values: unknown[] = [];
@@ -707,6 +720,10 @@ containersRouter.get('/:id/report', async (req, res) => {
       size: full.size,
       status: full.status,
       dateLimiteRetour: full.dateLimiteRetour,
+      clientNom: full.clientNom,
+      clientContact: full.clientContact,
+      contenuDescription: full.contenuDescription,
+      destinationDechargement: full.destinationDechargement,
     },
     detention: {
       jours: detentionJours,
