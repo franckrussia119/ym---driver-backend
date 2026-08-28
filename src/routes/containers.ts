@@ -282,6 +282,10 @@ const updateSchema = z.object({
   clientContact: z.string().optional(),
   contenuDescription: z.string().optional(),
   destinationDechargement: z.string().optional(),
+  tarifConvenuFCFA: z.number().nonnegative().optional(),
+  documentsRequis: z.string().optional(),
+  immatriculationCamionTrajet: z.string().optional(),
+  remorqueTrajet: z.string().optional(),
 });
 
 containersRouter.patch('/:id', requireRole(...CONTAINER_STAFF), async (req, res) => {
@@ -307,6 +311,8 @@ containersRouter.patch('/:id', requireRole(...CONTAINER_STAFF), async (req, res)
     containerNumber: '"containerNumber"', size: 'size', notes: 'notes',
     clientNom: '"clientNom"', clientContact: '"clientContact"',
     contenuDescription: '"contenuDescription"', destinationDechargement: '"destinationDechargement"',
+    tarifConvenuFCFA: '"tarifConvenuFCFA"', documentsRequis: '"documentsRequis"',
+    immatriculationCamionTrajet: '"immatriculationCamionTrajet"', remorqueTrajet: '"remorqueTrajet"',
   };
   const sets: string[] = [];
   const values: unknown[] = [];
@@ -397,6 +403,8 @@ const assignSchema = z.object({
   carrierType: z.enum(['CHAUFFEUR_INTERNE', 'SOUS_TRAITANT']),
   driverId: z.string().optional(),
   subcontractorId: z.string().optional(),
+  immatriculationCamionTrajet: z.string().optional(),
+  remorqueTrajet: z.string().optional(),
 });
 
 containersRouter.patch('/:id/assign', requireRole(...CONTAINER_STAFF), async (req, res) => {
@@ -422,12 +430,16 @@ containersRouter.patch('/:id/assign', requireRole(...CONTAINER_STAFF), async (re
     : null;
 
   const { rows } = await pool.query(
-    `UPDATE containers SET "carrierType" = $1, "assignedDriverId" = $2, "assignedSubcontractorId" = $3 WHERE id = $4 RETURNING id`,
+    `UPDATE containers SET "carrierType" = $1, "assignedDriverId" = $2, "assignedSubcontractorId" = $3,
+       "immatriculationCamionTrajet" = COALESCE($5, "immatriculationCamionTrajet"), "remorqueTrajet" = COALESCE($6, "remorqueTrajet")
+     WHERE id = $4 RETURNING id`,
     [
       d.carrierType,
       d.carrierType === 'CHAUFFEUR_INTERNE' ? d.driverId : null,
       d.carrierType === 'SOUS_TRAITANT' ? d.subcontractorId : null,
       req.params.id,
+      d.immatriculationCamionTrajet ?? null,
+      d.remorqueTrajet ?? null,
     ]
   );
   if (!rows[0]) return res.status(404).json({ error: 'Conteneur introuvable' });
