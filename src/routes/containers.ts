@@ -145,6 +145,80 @@ containersRouter.get('/returns-history', async (req, res) => {
 // REGROUPEMENT PAR BL : un même BL peut couvrir plusieurs conteneurs.
 // Doit être déclaré AVANT /:id pour ne pas être intercepté par cette route.
 // ------------------------------------------------------------------
+// ------------------------------------------------------------------
+// TABLEAU DE BORD OPÉRATIONNEL EN DIRECT : où en est chaque conteneur
+// ouvert en ce moment — chauffeur, étape actuelle du pipeline, preuve de
+// livraison faite ou non, retard de retour. Doit être déclaré AVANT /:id.
+// ------------------------------------------------------------------
+containersRouter.get('/ops-board', requireRole(...CONTAINER_STAFF), async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT c.*, sd.nom AS "subcontractorNom", sc.nom AS "subcontractorEntreprise",
+            u.name AS "driverNom", u.telephone AS "driverTelephone",
+            EXISTS(SELECT 1 FROM pod_records p WHERE p."containerId" = c.id) AS "hasPod",
+            (SELECT s."stepName" FROM container_pipeline_steps s
+             WHERE s."containerId" = c.id AND s.status != 'DONE'
+             ORDER BY s."stepNumber" ASC LIMIT 1) AS "currentStepName",
+            (SELECT s."stepNumber" FROM container_pipeline_steps s
+             WHERE s."containerId" = c.id AND s.status != 'DONE'
+             ORDER BY s."stepNumber" ASC LIMIT 1) AS "currentStepNumber",
+            (SELECT count(*) FROM container_incidents i WHERE i."containerId" = c.id) AS "incidentsCount"
+     FROM containers c
+     LEFT JOIN subcontractor_drivers sd ON sd.id = c."assignedSubcontractorId"
+     LEFT JOIN subcontractor_companies sc ON sc.id = sd."companyId"
+     LEFT JOIN users u ON u.id = c."assignedDriverId"
+     WHERE c.status = 'OUVERT'
+     ORDER BY c."createdAt" ASC`
+  );
+  const today = new Date().toISOString().split('T')[0];
+  res.json(
+    rows.map((r: any) => ({
+      ...r,
+      incidentsCount: Number(r.incidentsCount),
+      estEnRetard: r.dateLimiteRetour ? r.dateLimiteRetour < today : false,
+    }))
+  );
+});
+
+// ------------------------------------------------------------------
+// SYNTHÈSE FINANCIÈRE : revenus (tarifs convenus), coûts et marge sur
+// l'ensemble des conteneurs. Doit être déclaré AVANT /:id.
+// ------------------------------------------------------------------
+containersRouter.get('/revenue-summary', requireRole(...CONTAINER_STAFF), async (req, res) => {
+  const { rows: containers } = await pool.query(
+    `SELECT c.id, c.status, c."tarifConvenuFCFA", c."fraisDepotFCFA", c."fraisSupplementairesFCFA",
+            r."fraisRetourFCFA"
+     FROM containers c
+     LEFT JOIN container_returns r ON r."containerId" = c.id`
+  );
+  const { rows: dutySteps } = await pool.query(
+    `SELECT "containerId", details FROM container_pipeline_steps WHERE "stepNumber" = 3`
+  );
+  const dutyByContainer = new Map(dutySteps.map((s: any) => [s.containerId, Number(s.details?.montantFCFA ?? 0)]));
+
+  let totalRevenue = 0;
+  let totalCosts = 0;
+  let containersWithRate = 0;
+  for (const c of containers) {
+    const tarif = Number(c.tarifConvenuFCFA ?? 0);
+    const duty = dutyByContainer.get(c.id) ?? 0;
+    const retour = Number(c.fraisRetourFCFA ?? 0);
+    const depot = Number(c.fraisDepotFCFA ?? 0);
+    const suppl = Number(c.fraisSupplementairesFCFA ?? 0);
+    totalRevenue += tarif;
+    totalCosts += duty + retour + depot + suppl;
+    if (tarif > 0) containersWithRate++;
+  }
+
+  res.json({
+    totalContainers: containers.length,
+    containersWithRate,
+    containersWithoutRate: containers.length - containersWithRate,
+    totalRevenueFCFA: totalRevenue,
+    totalCostsFCFA: totalCosts,
+    totalMargeFCFA: totalRevenue - totalCosts,
+  });
+});
+
 containersRouter.get('/bls', requireRole(...CONTAINER_STAFF), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT
@@ -216,6 +290,7 @@ const createSchema = z.object({
   clientContact: z.string().optional(),
   contenuDescription: z.string().optional(),
   destinationDechargement: z.string().optional(),
+  depotRetourPrevu: z.string().optional(),
 });
 
 containersRouter.post('/', requireRole(...CONTAINER_STAFF), async (req, res) => {
@@ -242,12 +317,12 @@ containersRouter.post('/', requireRole(...CONTAINER_STAFF), async (req, res) => 
   const containerId = await withReferenceNumberRetry('CONT', async (numeroReference) =>
     withTransaction(async (client) => {
       const { rows } = await client.query(
-        `INSERT INTO containers (id, "numeroReference", "blNumber", port, terminal, "containerNumber", size, "dateLimiteRetour", "createdById", notes, "clientNom", "clientContact", "contenuDescription", "destinationDechargement")
-         VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        `INSERT INTO containers (id, "numeroReference", "blNumber", port, terminal, "containerNumber", size, "dateLimiteRetour", "createdById", notes, "clientNom", "clientContact", "contenuDescription", "destinationDechargement", "depotRetourPrevu")
+         VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          RETURNING id`,
         [
           numeroReference, d.blNumber, d.port, d.terminal, d.containerNumber, d.size, d.dateLimiteRetour ?? null, req.user!.sub, d.notes ?? null,
-          d.clientNom ?? null, d.clientContact ?? null, d.contenuDescription ?? null, d.destinationDechargement ?? null,
+          d.clientNom ?? null, d.clientContact ?? null, d.contenuDescription ?? null, d.destinationDechargement ?? null, d.depotRetourPrevu ?? null,
         ]
       );
       const id = rows[0].id;
@@ -282,6 +357,7 @@ const updateSchema = z.object({
   clientContact: z.string().optional(),
   contenuDescription: z.string().optional(),
   destinationDechargement: z.string().optional(),
+  depotRetourPrevu: z.string().optional(),
   tarifConvenuFCFA: z.number().nonnegative().optional(),
   documentsRequis: z.string().optional(),
   immatriculationCamionTrajet: z.string().optional(),
@@ -311,6 +387,7 @@ containersRouter.patch('/:id', requireRole(...CONTAINER_STAFF), async (req, res)
     containerNumber: '"containerNumber"', size: 'size', notes: 'notes',
     clientNom: '"clientNom"', clientContact: '"clientContact"',
     contenuDescription: '"contenuDescription"', destinationDechargement: '"destinationDechargement"',
+    depotRetourPrevu: '"depotRetourPrevu"',
     tarifConvenuFCFA: '"tarifConvenuFCFA"', documentsRequis: '"documentsRequis"',
     immatriculationCamionTrajet: '"immatriculationCamionTrajet"', remorqueTrajet: '"remorqueTrajet"',
   };
@@ -771,6 +848,8 @@ containersRouter.get('/:id/report', async (req, res) => {
     montantFraisSupplementairesFCFA: montantFraisSupplementaires,
     fraisSupplementairesNote: full.fraisSupplementairesNote ?? null,
     montantTotalFCFA: montantDroitsTaxes + montantFraisRetour + montantFraisDepot + montantFraisSupplementaires,
+    tarifConvenuFCFA: Number(full.tarifConvenuFCFA ?? 0),
+    margeFCFA: Number(full.tarifConvenuFCFA ?? 0) - (montantDroitsTaxes + montantFraisRetour + montantFraisDepot + montantFraisSupplementaires),
     stepsCompleted: full.steps.filter((s: any) => s.status === 'DONE').length,
     stepsTotal: full.steps.length,
     stepsBlocked: full.steps.filter((s: any) => s.status === 'BLOCKED').length,
