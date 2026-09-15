@@ -738,18 +738,16 @@ containersRouter.post('/:id/return', requireRole(...CONTAINER_STAFF, 'CHAUFFEUR'
 // RAPPORT PAR CONTENEUR (calculé à la volée, jamais figé en base pour
 // toujours refléter les dernières données).
 // ------------------------------------------------------------------
-containersRouter.get('/:id/report', async (req, res) => {
-  const full = await fetchFullContainer(req.params.id);
-  if (!full) return res.status(404).json({ error: 'Conteneur introuvable' });
-
+// ------------------------------------------------------------------
+// Calcul du rapport complet d'UN conteneur — extrait en fonction
+// réutilisable pour pouvoir aussi construire un rapport consolidé par BL
+// (plusieurs conteneurs) sans dupliquer toute cette logique.
+// ------------------------------------------------------------------
+function buildContainerReportData(full: any) {
   const openedAt = new Date(full.createdAt);
   const closedAt = full.closedAt ? new Date(full.closedAt) : new Date();
   const totalDays = Math.max(0, Math.round((closedAt.getTime() - openedAt.getTime()) / 86_400_000));
 
-  // Détention réelle côté client : du jour où le conteneur a été livré
-  // (preuve de livraison) jusqu'au jour où sa vie est terminée (retour) —
-  // c'est la période qui compte vraiment pour la détention/surestarie,
-  // distincte du temps administratif avant livraison.
   let joursDetentionClient: number | null = null;
   let dateLivraisonClient: string | null = null;
   if (full.pod.length > 0) {
@@ -762,8 +760,6 @@ containersRouter.get('/:id/report', async (req, res) => {
     joursDetentionClient = Math.max(0, Math.round((referenceAt.getTime() - livraisonAt.getTime()) / 86_400_000));
   }
 
-  // Suivi de détention : combien de jours au-delà (ou avant) la date limite
-  // de retour — directement lié au problème de coûts de détention non maîtrisés.
   let detentionJours: number | null = null;
   let detentionStatut: 'DANS_LES_DELAIS' | 'EN_RETARD' | 'NON_DEFINI' = 'NON_DEFINI';
   if (full.dateLimiteRetour) {
@@ -793,12 +789,10 @@ containersRouter.get('/:id/report', async (req, res) => {
       ? full.subcontractorTelephone || null
       : null;
 
-  // Le retour peut être fait par un chauffeur différent de celui qui a
-  // livré (pool ouvert) — les deux sont donc rapportés séparément.
   const retourParLabel = full.return?.filledByNom || null;
   const retourParTelephone = full.return?.filledByTelephone || null;
 
-  res.json({
+  return {
     container: {
       id: full.id,
       numeroReference: full.numeroReference,
@@ -855,6 +849,14 @@ containersRouter.get('/:id/report', async (req, res) => {
     stepsBlocked: full.steps.filter((s: any) => s.status === 'BLOCKED').length,
     documentsCount: full.documents.length,
     documentsValidated: full.documents.filter((d: any) => d.status === 'VALIDATED').length,
+    documents: full.documents.map((d: any) => ({
+      id: d.id,
+      type: d.type,
+      fileUrl: d.fileUrl,
+      status: d.status,
+      uploadedByNom: d.uploadedByNom,
+      uploadedAt: d.uploadedAt,
+    })),
     timeline: full.steps.map((s: any) => ({
       stepNumber: s.stepNumber,
       stepName: s.stepName,
@@ -865,5 +867,50 @@ containersRouter.get('/:id/report', async (req, res) => {
     })),
     pod: full.pod,
     return: full.return,
+  };
+}
+
+containersRouter.get('/:id/report', async (req, res) => {
+  const full = await fetchFullContainer(req.params.id);
+  if (!full) return res.status(404).json({ error: 'Conteneur introuvable' });
+  res.json(buildContainerReportData(full));
+});
+
+// ------------------------------------------------------------------
+// RAPPORT CONSOLIDÉ PAR BL : un même BL peut couvrir plusieurs
+// conteneurs — ce rapport les regroupe tous (ouverts et fermés) avec un
+// récapitulatif financier global, pour tout savoir sur le BL en un seul
+// document imprimable. Doit être déclaré AVANT /:id/report ne s'applique
+// pas ici (chemin différent), mais reste avec les routes /bl/* groupées.
+// ------------------------------------------------------------------
+containersRouter.get('/bl/:blNumber/report', requireRole(...CONTAINER_STAFF), async (req, res) => {
+  const { rows: idRows } = await pool.query(
+    `SELECT id FROM containers WHERE lower(trim("blNumber")) = lower(trim($1)) ORDER BY "createdAt" ASC`,
+    [req.params.blNumber]
+  );
+  if (idRows.length === 0) return res.status(404).json({ error: 'Aucun conteneur trouvé pour ce BL' });
+
+  const reports = await Promise.all(
+    idRows.map(async (r: any) => {
+      const full = await fetchFullContainer(r.id);
+      return buildContainerReportData(full);
+    })
+  );
+
+  const totalRevenueFCFA = reports.reduce((sum, r) => sum + r.tarifConvenuFCFA, 0);
+  const totalCostsFCFA = reports.reduce((sum, r) => sum + r.montantTotalFCFA, 0);
+  const ouverts = reports.filter((r) => r.isOuvert).length;
+  const fermes = reports.length - ouverts;
+
+  res.json({
+    blNumber: req.params.blNumber,
+    totalContainers: reports.length,
+    ouverts,
+    fermes,
+    totalRevenueFCFA,
+    totalCostsFCFA,
+    totalMargeFCFA: totalRevenueFCFA - totalCostsFCFA,
+    containers: reports,
   });
 });
+
