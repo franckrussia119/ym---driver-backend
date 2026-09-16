@@ -1,0 +1,9 @@
+{
+  "name": "YM-TRANSIT - Rapport Hebdomadaire du Chauffeur",
+  "description": "Application numérique complète de gestion du rapport hebdomadaire du chauffeur et d'inspection du véhicule (DVIR) pour YM-TRANSIT.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

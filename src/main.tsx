@@ -1,0 +1,25 @@
+import {StrictMode} from 'react';
+import {createRoot} from 'react-dom/client';
+import App from './App.tsx';
+import './index.css';
+import 'leaflet/dist/leaflet.css';
+
+// Register Service Worker for PWA support
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker
+      .register('/sw.js')
+      .then((reg) => {
+        console.log('PWA Service Worker enregistré avec succès:', reg.scope);
+      })
+      .catch((err) => {
+        console.warn('Échec enregistrement Service Worker:', err);
+      });
+  });
+}
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);

@@ -1,0 +1,33 @@
+{
+  "id": "/",
+  "short_name": "YM-TRANSIT",
+  "name": "YM-TRANSIT Mobile Driver & Fleet Management",
+  "description": "Application Mobile pour Chauffeurs, Atelier Mécanique et Administration Flotte YM-TRANSIT",
+  "start_url": "/",
+  "scope": "/",
+  "background_color": "#0f172a",
+  "theme_color": "#2563eb",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "categories": ["business", "logistics", "productivity"],
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-maskable-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "maskable"
+    }
+  ]
+}
