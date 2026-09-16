@@ -52,6 +52,12 @@ app.use('/api', rateLimit({ windowMs: 60 * 1000, max: 300, standardHeaders: true
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 app.use('/uploads', express.static(process.env.UPLOAD_DIR ?? path.join(__dirname, '..', 'uploads')));
+// Si le fichier n'existe plus (ex: volume non persistant lors d'un
+// redéploiement), on renvoie une erreur claire plutôt que la page
+// "Cannot GET" brute d'Express, pour que ce soit diagnosticable.
+app.use('/uploads', (_req, res) => {
+  res.status(404).json({ error: "Ce fichier n'est plus disponible sur le serveur. Il a peut-être été perdu lors d'un redéploiement (stockage non persistant)." });
+});
 
 // Garde-fou global : le Superviseur Conteneurs ne peut atteindre que le
 // module conteneurs, quel que soit ce qu'un routeur individuel autoriserait.
