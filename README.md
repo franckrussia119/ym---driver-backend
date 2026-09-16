@@ -1,72 +1,92 @@
-# YM-TRANSIT — Rapport Hebdomadaire du Chauffeur & Gestion de Flotte
+# YM-TRANSIT — Backend API
 
-Application web (PWA) de gestion logistique pour YM-TRANSIT : rapports hebdomadaires
-chauffeur, inspection véhicule (DVIR), pannes & atelier mécanique, registre de
-flotte, maintenance préventive, suivi des cautions de conteneurs, planification de
-tournées, analyse carburant et performance chauffeurs.
+API REST pour YM-TRANSIT : authentification, rapports hebdomadaires, pannes &
+atelier mécanique, registre de flotte, maintenance préventive, cautions de
+conteneurs, analyse carburant, performance chauffeurs, et planification de
+tournées (optimisation plus proche voisin + 2-opt).
 
-> **Stockage actuel : navigateur (localStorage).** Il n'y a pas encore de backend
-> partagé — chaque utilisateur voit ses propres données locales. Un backend
-> (PostgreSQL + API) sera ajouté dans une étape ultérieure une fois les
-> fonctionnalités validées.
+> Ce backend a été construit et testé de bout en bout (authentification,
+> verrouillage des rapports après envoi, workflow de panne à 4 étapes,
+> moteur de planification) avant livraison. Voir `TESTING.md` pour le détail
+> des scénarios vérifiés.
 
 ## Stack
 
-- React 19 + TypeScript + Vite 6
-- Tailwind CSS 4
-- Lucide icons
-- PWA (service worker + manifest, installable sur mobile)
+- Node.js 20 + TypeScript + Express
+- PostgreSQL (via `pg`, requêtes SQL paramétrées — pas d'ORM)
+- JWT (access token 15 min + refresh token opaque stocké haché en base)
+- bcrypt pour les mots de passe
 
 ## Lancer en local
 
-**Prérequis :** Node.js 20+
+**Prérequis :** Node.js 20+, PostgreSQL 16 accessible.
 
 ```bash
 npm install
-npm run dev
+cp .env.example .env   # puis renseignez DATABASE_URL et JWT_SECRET
+npm run migrate        # applique migrations/001_init.sql
+npm run seed           # crée les 5 comptes de démonstration
+npm run dev            # démarre sur http://localhost:4000
 ```
 
-L'app est servie sur `http://localhost:3000`.
+## Comptes de démonstration (créés par `npm run seed`)
 
-## Build de production
+| Rôle | Email | Mot de passe |
+|---|---|---|
+| Super Admin | superadmin@ym-transit.com | admin123 |
+| Admin | admin@ym-transit.com | admin123 |
+| Superviseur | superviseur@ym-transit.com | super123 |
+| Mécanicien | mecanicien@ym-transit.com | mech123 |
+| Chauffeur | chauffeur@ym-transit.com | driver123 |
 
-```bash
-npm run build
-npm run preview   # pour tester le build localement
-```
+**À changer immédiatement en production** (Super Admin → gestion des
+utilisateurs → réinitialiser mot de passe).
 
-Le résultat est généré dans `dist/`.
+## Déploiement sur Coolify
 
-## Déploiement Docker / Coolify
+1. Poussez ce dépôt sur GitHub.
+2. Dans Coolify, créez une nouvelle **Application** à partir de ce dépôt,
+   branche `main`. Coolify détecte `docker-compose.yml` automatiquement
+   (Build Pack : Docker Compose).
+3. Renseignez les variables d'environnement (voir `.env.example`) dans
+   l'interface Coolify : `POSTGRES_PASSWORD`, `JWT_SECRET` (générez une
+   valeur forte, ex. `openssl rand -hex 32`), et `CORS_ORIGIN` avec l'URL
+   exacte de votre frontend une fois déployé.
+4. Déployez. Le conteneur `backend` applique automatiquement les migrations
+   au démarrage (`node dist/migrate.js && node dist/index.js`).
+5. Une fois en ligne, exécutez le seed une seule fois via le terminal
+   Coolify du service `backend` :
+   ```bash
+   node dist/seed.js
+   ```
+6. Le endpoint de santé `/health` doit répondre `{"status":"ok"}`.
 
-Un `Dockerfile` multi-stage (build Node puis service Nginx) est fourni à la racine
-du projet.
+## Endpoints principaux
 
-### Build & run en local (test)
+Toutes les routes sous `/api/*` (sauf `/api/auth/login`) nécessitent un
+header `Authorization: Bearer <accessToken>`.
 
-```bash
-docker build -t ym-transit .
-docker run -p 8080:80 ym-transit
-```
+- `POST /api/auth/login`, `/refresh`, `/logout`, `GET /me`
+- `GET/POST/PATCH /api/users` — Super Admin uniquement
+- `GET/POST/PATCH /api/reports` — création, verrouillage à l'envoi
+- `GET/POST /api/faults`, `POST /api/faults/:id/advance` — workflow à 4 étapes
+- `GET/POST /api/invoices` — factures atelier avec pièces détachées
+- `GET/POST/PATCH /api/vehicles`, `POST /api/vehicles/:id/documents`
+- `GET/POST /api/maintenance/plans`, `/scheduled`
+- `GET/POST /api/cautions`, `POST /api/cautions/:id/return`, `/lost`
+- `GET/POST /api/fuel` — détection d'anomalie automatique
+- `GET /api/performance`, `POST /api/performance/recompute`
+- `GET/POST /api/route-planning/plans` — moteur de planification réel
+- `GET/POST /api/pod`, `/api/feedback`
+- `POST /api/uploads` — upload de fichier (photo, signature, document)
 
-L'app est alors accessible sur `http://localhost:8080`. Le endpoint `/healthz`
-répond `200 ok` pour la vérification de santé du conteneur.
+## Notes de conception
 
-### Sur Coolify
-
-1. Créer une nouvelle **Application** dans Coolify.
-2. Source : ce dépôt GitHub, branche `main`.
-3. Build Pack : **Dockerfile** (Coolify détecte automatiquement le `Dockerfile` à
-   la racine).
-4. Port exposé par le conteneur : **80**.
-5. Aucune variable d'environnement obligatoire pour le moment (le build ne dépend
-   d'aucune clé au moment de la compilation).
-6. Déployer — Coolify build l'image et route le trafic vers le port 80 du
-   conteneur.
-
-## Comptes de démonstration
-
-Les comptes utilisateurs actuels (chauffeur, mécanicien, superviseur/admin,
-super admin) sont des données de démonstration stockées dans
-`src/data/defaults.ts`, à remplacer par de vrais comptes une fois le backend
-en place.
+- Les champs de statut/catégorie (gravité de défaut, statut de panne, type
+  de document...) sont stockés en `TEXT` et validés côté API avec `zod`, en
+  utilisant exactement les mêmes chaînes françaises que le frontend
+  d'origine — pas de mapping enum à maintenir.
+- `migrations/_reference_data_model.prisma.txt` documente le même schéma au
+  format Prisma, à titre de référence lisible (le projet utilise du SQL brut
+  en production, pas Prisma, pour éviter la dépendance aux binaires moteur
+  téléchargés à l'installation).

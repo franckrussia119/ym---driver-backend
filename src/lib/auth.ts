@@ -1,63 +1,45 @@
-import { api, setTokens, clearTokens, getAccessToken } from './api';
-import { UserProfile } from '../types';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 
-export interface LoginResponse {
-  accessToken: string;
-  refreshToken: string;
-  user: { id: string; name: string; email: string; role: UserProfile['role'] };
+const ACCESS_TOKEN_TTL = '15m';
+const REFRESH_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 jours
+
+export interface AccessTokenPayload {
+  sub: string; // user id
+  role: string;
+  name: string;
 }
 
-export async function login(email: string, password: string): Promise<UserProfile> {
-  const data = await api.post<LoginResponse>(
-    '/api/auth/login',
-    { email, password },
-    { skipAuth: true }
-  );
-  setTokens(data.accessToken, data.refreshToken);
-  return {
-    id: data.user.id,
-    name: data.user.name,
-    email: data.user.email,
-    role: data.user.role,
-    isActive: true,
-  };
+export async function hashPassword(plain: string): Promise<string> {
+  return bcrypt.hash(plain, 12);
 }
 
-export async function logout(): Promise<void> {
-  const refreshToken = localStorage.getItem('ym_transit_refresh_token');
-  clearTokens();
-  if (refreshToken) {
-    try {
-      await api.post('/api/auth/logout', { refreshToken });
-    } catch {
-      /* la déconnexion locale a déjà eu lieu, peu importe si l'appel échoue */
-    }
-  }
+export async function verifyPassword(plain: string, hash: string): Promise<boolean> {
+  return bcrypt.compare(plain, hash);
 }
 
-// Restaure la session au chargement de l'app à partir du jeton stocké.
-// Retourne null si aucun jeton, ou si le jeton est invalide/expiré.
-export async function restoreSession(): Promise<UserProfile | null> {
-  if (!getAccessToken()) return null;
-  try {
-    const me = await api.get<{
-      id: string;
-      name: string;
-      email: string;
-      role: UserProfile['role'];
-      isActive: boolean;
-      camionAssigne?: string;
-    }>('/api/auth/me');
-    return {
-      id: me.id,
-      name: me.name,
-      email: me.email,
-      role: me.role,
-      isActive: me.isActive,
-      camionAssigne: me.camionAssigne,
-    };
-  } catch {
-    clearTokens();
-    return null;
-  }
+export function signAccessToken(payload: AccessTokenPayload): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error('JWT_SECRET manquant');
+  return jwt.sign(payload, secret, { expiresIn: ACCESS_TOKEN_TTL });
+}
+
+export function verifyAccessToken(token: string): AccessTokenPayload {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error('JWT_SECRET manquant');
+  return jwt.verify(token, secret) as AccessTokenPayload;
+}
+
+// Le refresh token est une chaîne aléatoire opaque, jamais un JWT :
+// il est stocké haché en base et peut être révoqué individuellement.
+export function generateRefreshToken(): { token: string; hash: string; expiresAt: Date } {
+  const token = crypto.randomBytes(48).toString('hex');
+  const hash = crypto.createHash('sha256').update(token).digest('hex');
+  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
+  return { token, hash, expiresAt };
+}
+
+export function hashRefreshToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
 }
